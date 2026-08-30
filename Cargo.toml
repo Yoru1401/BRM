@@ -1,0 +1,12 @@
+[package]
+name = "idk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# file_watcher still earns its place: the shader hot-reloads, even though the
+# scene no longer does.
+bevy = { version = "0.19.1", features = ["file_watcher"] }
+
+[profile.dev.package."*"]
+opt-level = 3

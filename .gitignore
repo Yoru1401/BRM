@@ -1,0 +1,5 @@
+/target
+
+# Working memory for the AI sessions - notes, decisions, benchmarks.
+# Local only, on purpose.
+/memory
