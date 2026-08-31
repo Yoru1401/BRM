@@ -11,10 +11,10 @@ One SDF, evaluated twice from the **same packed bytes**: on the GPU in
 `assets/shaders/sdf.wgsl` for rendering, on the CPU in `src/field.rs` for
 physics. There is no separate collision geometry to keep in step.
 
-- **Rendering** — cone-assisted ray marching on a single frustum-fitted quad.
-  The vertex stage marches one coarse ray per cell, the fragment stage resumes
-  per pixel and writes real depth, so ordinary Bevy 3D entities share the world
-  and occlude correctly.
+- **Rendering** — ray marching on a single frustum-fitted quad, one ray per
+  pixel, against a uniform grid of per-cell shape lists. Over-relaxed steps
+  (Keinert et al.). The fragment stage writes real depth, so ordinary Bevy 3D
+  entities share the world and occlude correctly.
 - **Geometry** — one entity per brush, authored in `bsn!`. Brushes carry
   `SdfShape` + `Transform` + `Modifiers` + `CsgOperation` + `Albedo` and blend
   in child order. The modifier set (round, bevel, thickness, cone, sharpen) is
@@ -34,15 +34,27 @@ Debug builds are misleading: `debug-assertions` are profile-wide and put a
 | key | does |
 |---|---|
 | `WASD` / `Space` / `LShift`, right-drag | fly camera |
-| `C` | cone marching on/off |
 | `V` | hide the quad — the frame floor underneath |
 | `H` | shaded / march-step heatmap |
+
+## Benchmark
+
+```sh
+cargo run --release -- bench empty        # the march against an empty field
+cargo run --release -- bench grid:20      # 20 boxes tiling a fixed slab
+cargo run --release -- bench spread:80      # 80 boxes scattered over a level
+cargo run --release -- bench spread:80 --no-grid --repeat 3
+```
+
+Prints one tab-separated line of min / median / p95 frame ms and exits. The
+count scenes tile the same volume, so only the shape count changes - not the
+screen coverage.
 
 ## Layout
 
 | module | owns |
 |---|---|
-| `field` | shapes, packing, the field on CPU. Depends on nothing |
+| `field` | shapes, packing, the acceleration grid, the field on CPU. Depends on nothing |
 | `render` | material, quad fitting, debug views |
 | `world` | the authored scene |
 | `input` | `Action`, `Bindings` |

@@ -1,5 +1,5 @@
-//! An SDF template: one signed distance field, rendered by cone-assisted ray
-//! marching and queried by the physics on the CPU.
+//! An SDF template: one signed distance field, ray marched on the GPU against
+//! an acceleration grid, and queried by the physics on the CPU.
 //!
 //! # How a frame fits together
 //!
@@ -15,8 +15,7 @@
 //! archetypes by component set, not by spawn order.
 //!
 //! Rendering happens on a single quad parented to the camera and fitted to the
-//! frustum. Its vertex shader cone-marches one coarse ray per cell; its
-//! fragment shader resumes per pixel. The fragment stage writes real depth, so
+//! frustum, one ray per pixel in the fragment stage. It writes real depth, so
 //! ordinary Bevy 3D entities - the holograms here - share the world and occlude
 //! correctly.
 //!
@@ -36,11 +35,11 @@
 //!
 //! | key | effect |
 //! |-----|--------|
-//! | `C` | cone marching on/off, for a one-keypress A/B |
 //! | `V` | hide the quad, revealing Bevy's own per-frame cost |
 //! | `H` | shaded / march-step heatmap |
 
 
+mod bench;
 mod field;
 mod input;
 mod physics;
@@ -59,21 +58,33 @@ use bevy::{prelude::*, window::PresentMode};
 pub(crate) const SPAWN_EXTRAS: bool = true;
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
+    // `bench <scene>` on the command line measures instead of playing: a
+    // generated scene, a parked camera, and none of the extras. See bench.rs.
+    let bench = bench::requested();
+
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(match &bench {
+            Some(_) => bench::bench_window(),
+            None => Window {
                 present_mode: PresentMode::AutoNoVsync, // honest FPS numbers
                 ..default()
-            }),
-            ..default()
-        }))
-        .add_plugins((
-            field::FieldPlugin,
-            render::RenderPlugin,
-            world::WorldPlugin,
-            input::InputPlugin,
-            physics::PhysicsPlugin,
-            ui::UiPlugin,
-        ))
-        .run();
+            },
+        }),
+        ..default()
+    }))
+    // Input is always registered: the render toggles read `ButtonInput<Action>`,
+    // so the plugin that fills it is not optional. A bench run pins the camera
+    // every frame instead of leaving it out.
+    .add_plugins((field::FieldPlugin, render::RenderPlugin, input::InputPlugin));
+
+    match bench {
+        Some(bench) => {
+            app.add_plugins(bench::BenchPlugin(bench));
+        }
+        None => {
+            app.add_plugins((world::WorldPlugin, physics::PhysicsPlugin, ui::UiPlugin));
+        }
+    }
+    app.run();
 }

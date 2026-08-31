@@ -22,12 +22,13 @@ pub(crate) struct FieldPlugin;
 impl Plugin for FieldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SdfScene>()
+            .init_resource::<GridSettings>()
             .add_systems(Update, sync_shapes_to_gpu);
     }
 }
 
 /// Must match MAX_MARCH_DISTANCE in sdf.wgsl - it is the empty-scene distance.
-const MAX_MARCH_DISTANCE: f32 = 100.0;
+pub(crate) const MAX_MARCH_DISTANCE: f32 = 100.0;
 /// Must match NORMAL_EPSILON in sdf.wgsl.
 const SURFACE_EPSILON: f32 = 0.0005;
 /// Smallest radius a curved primitive may shrink to before its distance
@@ -125,6 +126,14 @@ pub(crate) struct GpuShape {
     /// Linear RGB.
     pub(crate) albedo: Vec3,
     pub(crate) chamfer: u32,
+    /// Half the axis-aligned box used to reject this shape cheaply. Not the
+    /// shape's own bounding box: it is inflated so that `cull_scale` times the
+    /// distance to it is a true lower bound on what `shape_distance` returns.
+    pub(crate) cull_extent: Vec3,
+    /// How much the evaluator can undershoot the real distance. 1.0 where the
+    /// primitive is exact; below it where the estimate is deliberately
+    /// conservative, as the ellipsoid's is.
+    pub(crate) cull_scale: f32,
     pub(crate) blend: GpuBlend,
 }
 
@@ -137,11 +146,11 @@ pub(crate) const GPU_MODE_ADD: u32 = 0;
 pub(crate) const GPU_MODE_SUBTRACT: u32 = 1;
 pub(crate) const GPU_MODE_INTERSECT: u32 = 2;
 pub(crate) const GPU_MODE_PAINT: u32 = 3;
-const GPU_MODE_PUSH: u32 = 4;
-const GPU_MODE_AVOID: u32 = 5;
-const GPU_MODE_EMBOSS: u32 = 6;
-const GPU_MODE_DEBOSS: u32 = 7;
-const GPU_MODE_SHELL: u32 = 8;
+pub(crate) const GPU_MODE_PUSH: u32 = 4;
+pub(crate) const GPU_MODE_AVOID: u32 = 5;
+pub(crate) const GPU_MODE_EMBOSS: u32 = 6;
+pub(crate) const GPU_MODE_DEBOSS: u32 = 7;
+pub(crate) const GPU_MODE_SHELL: u32 = 8;
 
 /// The packed scene, exactly as the GPU sees it. Physics and any other CPU
 /// query read these same bytes, so there is one scene, not two.
@@ -152,6 +161,10 @@ const GPU_MODE_SHELL: u32 = 8;
 pub(crate) struct SdfScene {
     pub(crate) shapes: Vec<GpuShape>,
     pub(crate) static_count: usize,
+    /// The render-side acceleration grid, kept here so it is built once
+    /// alongside the packing. Physics does not use it: the CPU field stays
+    /// exact, and the grid only ever returns a more conservative answer.
+    pub(crate) grid: SdfGrid,
 }
 
 impl SdfScene {
@@ -239,7 +252,7 @@ impl SdfShape {
             }
         };
 
-        GpuShape {
+        let mut packed = GpuShape {
             center: translation,
             brush,
             s,
@@ -252,13 +265,17 @@ impl SdfShape {
             ),
             albedo: albedo.map(|albedo| albedo.0).unwrap_or(DEFAULT_ALBEDO),
             chamfer: u32::from(operation.chamfer),
+            cull_extent: Vec3::ZERO,
+            cull_scale: 1.0,
             blend: GpuBlend {
                 mode: operation.mode,
                 radius: operation.radius,
                 strength: operation.strength,
                 padding: 0.0,
             },
-        }
+        };
+        (packed.cull_extent, packed.cull_scale) = cull_bound(&packed);
+        packed
     }
 }
 
@@ -320,6 +337,7 @@ fn pack_shape(
 /// prefix that excludes the bodies themselves. Packing runs every frame because
 /// it is cheap; the upload and the bind-group rebuild are gated on the packed
 /// data actually differing.
+#[allow(clippy::too_many_arguments)] // one system, one job: pack and upload
 pub(crate) fn sync_shapes_to_gpu(
     world: Single<&Children, With<SdfWorld>>,
     shapes: Query<ShapeQuery>,
@@ -328,6 +346,7 @@ pub(crate) fn sync_shapes_to_gpu(
     mut materials: ResMut<Assets<SdfMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut scene: ResMut<SdfScene>,
+    settings: Res<GridSettings>,
 ) {
     // In `Children` order, which is the order they were authored in. A plain
     // query would hand them back grouped by archetype instead, and any shape
@@ -349,9 +368,9 @@ pub(crate) fn sync_shapes_to_gpu(
         static_count = static_count.min(MAX_SHAPES);
     }
 
-    // Repacking is cheap; the upload and the bind-group rebuild are not. A
-    // still scene should cost neither.
-    if packed == scene.shapes {
+    // Repacking is cheap; the upload, the grid rebuild and the bind-group
+    // rebuild are not. A still scene should cost none of them.
+    if packed == scene.shapes && !settings.is_changed() {
         return;
     }
     scene.shapes = packed;
@@ -365,12 +384,33 @@ pub(crate) fn sync_shapes_to_gpu(
     material.render_params.bounds_max = bounds_max;
     material.render_params.shape_count = scene.shapes.len() as u32;
 
-    let Some(mut buffer) = buffers.get_mut(&material.shapes) else {
-        return;
-    };
-    let mut padded = scene.shapes.clone();
-    padded.resize(MAX_SHAPES, GpuShape::default());
-    buffer.set_data(padded);
+    let grid = build_grid(&scene.shapes, bounds_min, bounds_max, settings.resolution);
+    material.render_params.grid = u32::from(settings.enabled);
+    material.render_params.grid_resolution = grid.resolution;
+    material.render_params.grid_origin = grid.origin;
+    material.render_params.grid_cell = grid.cell_size;
+
+    let handles = (
+        material.shapes.clone(),
+        material.grid_cells.clone(),
+        material.grid_indices.clone(),
+    );
+    if let Some(mut buffer) = buffers.get_mut(&handles.0) {
+        let mut padded = scene.shapes.clone();
+        padded.resize(MAX_SHAPES, GpuShape::default());
+        buffer.set_data(padded);
+    }
+    if let Some(mut buffer) = buffers.get_mut(&handles.1) {
+        let mut padded = grid.cells.clone();
+        padded.resize(GRID_CELL_WORDS, 0);
+        buffer.set_data(padded);
+    }
+    if let Some(mut buffer) = buffers.get_mut(&handles.2) {
+        let mut padded = grid.indices.clone();
+        padded.resize(GRID_INDEX_WORDS, 0);
+        buffer.set_data(padded);
+    }
+    scene.grid = grid;
 }
 
 // The CPU half of the signed distance field. Every function below mirrors one
@@ -646,7 +686,7 @@ const BOUNDS_SLACK: f32 = 0.05;
 
 /// Box holding every shape that adds material. The modes that only remove it
 /// cannot push the bounds outwards and are skipped.
-fn scene_bounds(shapes: &[GpuShape]) -> (Vec3, Vec3) {
+pub(crate) fn scene_bounds(shapes: &[GpuShape]) -> (Vec3, Vec3) {
     let mut minimum = Vec3::splat(f32::MAX);
     let mut maximum = Vec3::splat(f32::MIN);
     for shape in shapes {
@@ -667,6 +707,305 @@ fn scene_bounds(shapes: &[GpuShape]) -> (Vec3, Vec3) {
         minimum - Vec3::splat(BOUNDS_SLACK),
         maximum + Vec3::splat(BOUNDS_SLACK),
     )
+}
+
+
+// ================================================================ the grid
+
+/// Cells along each axis of the acceleration grid, and the ceiling the buffers
+/// are sized for. `bench --grid <n>` sweeps the live value.
+pub(crate) const GRID_DEFAULT_RESOLUTION: u32 = 16;
+pub(crate) const GRID_MAX_RESOLUTION: u32 = 32;
+const GRID_MAX_CELLS: usize =
+    (GRID_MAX_RESOLUTION * GRID_MAX_RESOLUTION * GRID_MAX_RESOLUTION) as usize;
+/// Words in the cell table: offset and count for every cell the buffer could
+/// ever hold.
+pub(crate) const GRID_CELL_WORDS: usize = GRID_MAX_CELLS * 2;
+/// Words in the membership list.
+pub(crate) const GRID_INDEX_WORDS: usize = GRID_MAX_ENTRIES;
+/// Ceiling on total cell memberships. A cell that would push past it is marked
+/// [`GRID_CELL_FULL`] instead, which is slower but never wrong.
+const GRID_MAX_ENTRIES: usize = 1 << 18;
+/// A cell that gave up indexing: evaluate every shape here.
+pub(crate) const GRID_CELL_FULL: u32 = u32::MAX;
+
+/// How the grid is built and whether it is used at all.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct GridSettings {
+    pub(crate) resolution: u32,
+    pub(crate) enabled: bool,
+}
+
+impl Default for GridSettings {
+    fn default() -> Self {
+        GridSettings {
+            resolution: GRID_DEFAULT_RESOLUTION,
+            enabled: true,
+        }
+    }
+}
+
+/// Which shapes each cell has to evaluate.
+///
+/// A cell lists, in blend order:
+///
+/// - shape 0, always, because it seeds the field
+/// - every shape whose mode is **not** ADD, always: subtract, intersect, push,
+///   avoid, emboss, deboss and shell all read the field itself, so one of them
+///   on the far side of the level still changes the answer here
+/// - every ADD shape whose cull box overlaps the cell
+///
+/// Storing indices rather than a bitmask is what makes the march loop short
+/// instead of merely cheap per shape.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub(crate) struct SdfGrid {
+    pub(crate) origin: Vec3,
+    /// Cubic. Dividing every axis by the same count instead gives pancake
+    /// cells on a flat scene, and the thinnest axis then sets the step length
+    /// for every ray - which is a crawl, not an acceleration.
+    pub(crate) cell_size: Vec3,
+    /// Cells along each axis. Derived from the bounds, so a wide flat world
+    /// gets many cells across and few up.
+    pub(crate) resolution: UVec3,
+    /// Two entries per cell: offset into `indices`, then count - or
+    /// [`GRID_CELL_FULL`] as the count.
+    pub(crate) cells: Vec<u32>,
+    pub(crate) indices: Vec<u32>,
+}
+
+// The grid's own lookups exist twice, like everything else in the field: here
+// as the reference the tests can run, and in sdf.wgsl as the one that ships.
+// Nothing on the CPU marches, so outside tests these are unused by design.
+#[allow(dead_code)]
+impl SdfGrid {
+    fn cell_count(&self) -> usize {
+        (self.resolution.x * self.resolution.y * self.resolution.z) as usize
+    }
+
+    /// Cell holding a point, clamped to the grid. Mirrors `grid_cell` in
+    /// sdf.wgsl.
+    pub(crate) fn cell_of(&self, point: Vec3) -> usize {
+        let slot = self.slot_of(point);
+        (slot.x as usize)
+            + (slot.y as usize) * self.resolution.x as usize
+            + (slot.z as usize) * (self.resolution.x * self.resolution.y) as usize
+    }
+
+    fn slot_of(&self, point: Vec3) -> Vec3 {
+        let last = (self.resolution - UVec3::ONE).as_vec3();
+        ((point - self.origin) / self.cell_size)
+            .floor()
+            .clamp(Vec3::ZERO, last)
+    }
+
+    /// Whether a point is inside the grid volume at all. Mirrors
+    /// `grid_holds` in sdf.wgsl.
+    ///
+    /// Outside it there is no cell to clamp to: the lookup would land in an
+    /// edge cell whose wall the point is already past, report a wall distance
+    /// of zero, and the march would take that as a surface. The camera usually
+    /// starts outside the scene bounds, so this is the common case, not a
+    /// corner one.
+    pub(crate) fn holds(&self, point: Vec3) -> bool {
+        let high = self.origin + self.cell_size * self.resolution.as_vec3();
+        point.cmpge(self.origin).all() && point.cmple(high).all()
+    }
+
+    /// Distance from a point to the wall of its own cell. Mirrors
+    /// `grid_exit_distance` in sdf.wgsl.
+    ///
+    /// This is the load-bearing part. A cell only knows its own shapes, so the
+    /// distance it reports may be far too large - the next cell could hold a
+    /// surface one step away. Clamping to the cell wall makes the answer
+    /// conservative again: nothing outside can be reached without crossing it.
+    /// How far each cell reaches past its own walls. Cells overlap by this
+    /// much, so the box a lookup measures against is bigger than the box that
+    /// chose it.
+    ///
+    /// Half a cell, not a sliver. A thin margin makes a ray travelling *along*
+    /// a wall - which is what every ray does when the camera sits on a cell
+    /// boundary - see a wall distance near zero at every step, crawl, run out
+    /// of budget and die. That drew as a slice of the world missing down the
+    /// middle of the screen.
+    ///
+    /// With half a cell of overlap the smallest distance any point in a cell
+    /// can report is half a cell, so a march always makes real progress. The
+    /// price is memberships: eight times as many, since every shape now
+    /// rasterises into twice the cells per axis.
+    ///
+    /// Mirrors `grid_overlap` in sdf.wgsl.
+    pub(crate) fn overlap(cell_size: Vec3) -> Vec3 {
+        cell_size * 0.5
+    }
+
+    pub(crate) fn exit_distance(&self, point: Vec3) -> f32 {
+        let slot = self.slot_of(point);
+        let overlap = Self::overlap(self.cell_size);
+        let low = self.origin + slot * self.cell_size - overlap;
+        let high = self.origin + (slot + Vec3::ONE) * self.cell_size + overlap;
+        let to_wall = (point - low).min(high - point);
+        to_wall.min_element().max(0.0)
+    }
+}
+
+/// Builds the grid by rasterising each shape's cull box into cells.
+///
+/// Two passes and a prefix sum rather than a vector per cell: a moving body
+/// rebuilds this every frame, so allocation churn would show up in the frame
+/// time it is meant to save.
+pub(crate) fn build_grid(
+    shapes: &[GpuShape],
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    resolution: u32,
+) -> SdfGrid {
+    let requested = resolution.clamp(1, GRID_MAX_RESOLUTION);
+    let span = (bounds_max - bounds_min).max(Vec3::splat(MIN_RADIUS));
+    // One cubic cell size, from the longest axis. The other axes then get
+    // however many cells they need, which is what keeps a flat world from
+    // being sliced into pancakes.
+    let side = span.max_element() / requested as f32;
+    let cell_size = Vec3::splat(side);
+    let resolution = (span / side)
+        .ceil()
+        .as_uvec3()
+        .max(UVec3::ONE)
+        .min(UVec3::splat(GRID_MAX_RESOLUTION));
+    let cells_total = (resolution.x * resolution.y * resolution.z) as usize;
+
+    let mut grid = SdfGrid {
+        origin: bounds_min,
+        cell_size,
+        resolution,
+        cells: vec![0; cells_total * 2],
+        indices: Vec::new(),
+    };
+    if shapes.is_empty() {
+        return grid;
+    }
+
+    // Inflated by the same overlap `exit_distance` measures against, so a cell
+    // knows every shape inside the box it reports distances to.
+    let margin = SdfGrid::overlap(cell_size);
+    // Which cells one shape belongs to: everything, or the box it covers.
+    let range_of = |index: usize, shape: &GpuShape| -> (Vec3, Vec3) {
+        if index == 0 || shape.blend.mode != GPU_MODE_ADD {
+            return (bounds_min, bounds_max);
+        }
+        (
+            shape.center - shape.cull_extent - margin,
+            shape.center + shape.cull_extent + margin,
+        )
+    };
+    let last = (resolution - UVec3::ONE).as_vec3();
+    let slots = |corner: Vec3| -> [usize; 3] {
+        let slot = ((corner - bounds_min) / cell_size).floor().clamp(Vec3::ZERO, last);
+        [slot.x as usize, slot.y as usize, slot.z as usize]
+    };
+
+    // Pass one: count.
+    let mut counts = vec![0u32; cells_total];
+    let mut total = 0usize;
+    for (index, shape) in shapes.iter().enumerate() {
+        let (low, high) = range_of(index, shape);
+        let (from, to) = (slots(low), slots(high));
+        for z in from[2]..=to[2] {
+            for y in from[1]..=to[1] {
+                for x in from[0]..=to[0] {
+                    let cell = x + y * resolution.x as usize
+                        + z * (resolution.x * resolution.y) as usize;
+                    counts[cell] += 1;
+                    total += 1;
+                }
+            }
+        }
+    }
+
+    // Over the ceiling: every cell evaluates everything. Slower than a grid,
+    // exactly as correct, and it cannot silently drop a shape.
+    if total > GRID_MAX_ENTRIES {
+        for cell in 0..cells_total {
+            grid.cells[cell * 2 + 1] = GRID_CELL_FULL;
+        }
+        return grid;
+    }
+
+
+    // Prefix sum into the offsets.
+    let mut offset = 0u32;
+    for (cell, count) in counts.iter().enumerate() {
+        grid.cells[cell * 2] = offset;
+        offset += count;
+    }
+    grid.indices = vec![0; total];
+
+    // Pass two: fill. Shapes go in ascending order, so every cell's list is
+    // already in blend order - which is the whole reason this is not a set.
+    let mut written = vec![0u32; cells_total];
+    for (index, shape) in shapes.iter().enumerate() {
+        let (low, high) = range_of(index, shape);
+        let (from, to) = (slots(low), slots(high));
+        for z in from[2]..=to[2] {
+            for y in from[1]..=to[1] {
+                for x in from[0]..=to[0] {
+                    let cell = x + y * resolution.x as usize
+                        + z * (resolution.x * resolution.y) as usize;
+                    let at = (grid.cells[cell * 2] + written[cell]) as usize;
+                    grid.indices[at] = index as u32;
+                    written[cell] += 1;
+                }
+            }
+        }
+    }
+    for (cell, count) in written.iter().enumerate() {
+        grid.cells[cell * 2 + 1] = *count;
+    }
+    grid
+}
+
+/// The field, evaluated through the grid. Mirrors `scene_distance_gridded` in
+/// sdf.wgsl.
+///
+/// Returns a value that is never larger than [`scene_distance`] would give, so
+/// a march using it can never step through a surface.
+#[allow(dead_code)]
+pub(crate) fn scene_distance_gridded(
+    shapes: &[GpuShape],
+    grid: &SdfGrid,
+    world_point: Vec3,
+) -> f32 {
+    if grid.cells.len() < grid.cell_count() * 2 || shapes.is_empty() || !grid.holds(world_point) {
+        return scene_distance(shapes, world_point);
+    }
+    let cell = grid.cell_of(world_point);
+    let count = grid.cells[cell * 2 + 1];
+    if count == GRID_CELL_FULL {
+        return scene_distance(shapes, world_point);
+    }
+
+    let offset = grid.cells[cell * 2] as usize;
+    let mut field = MAX_MARCH_DISTANCE;
+    let mut evaluated = 0;
+    for slot in 0..count as usize {
+        let shape = &shapes[grid.indices[offset + slot] as usize];
+        if evaluated > 0 && shape_cannot_reach(shape, world_point, field) {
+            continue;
+        }
+        let distance = shape_distance(shape, world_point);
+        field = if evaluated == 0 {
+            distance
+        } else {
+            blend(distance, field, &shape.blend, shape.chamfer != 0)
+        };
+        evaluated += 1;
+    }
+
+    // Only a cell that already holds every shape may report its field
+    // unclamped. Any other has to admit it cannot see past its own walls.
+    if count as usize == shapes.len() {
+        return field;
+    }
+    field.min(grid.exit_distance(world_point))
 }
 
 /// The four corners of a tetrahedron. Sampling the field at each and weighting
@@ -695,6 +1034,9 @@ pub(crate) fn scene_normal(shapes: &[GpuShape], world_point: Vec3) -> Vec3 {
 pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
     let mut field = MAX_MARCH_DISTANCE;
     for (index, shape) in shapes.iter().enumerate() {
+        if index > 0 && shape_cannot_reach(shape, world_point, field) {
+            continue;
+        }
         let distance = shape_distance(shape, world_point);
         field = if index == 0 {
             distance
@@ -703,4 +1045,80 @@ pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
         };
     }
     field
+}
+
+/// Distance to a shape's cull box. Zero inside it, where no useful bound
+/// exists.
+///
+/// Mirrors `cull_box_distance` in sdf.wgsl.
+pub(crate) fn cull_box_distance(offset: Vec3, half_extent: Vec3) -> f32 {
+    (offset.abs() - half_extent).max(Vec3::ZERO).length()
+}
+
+/// Whether a shape is far enough away that blending it in would leave the field
+/// exactly as it is - in which case the expensive evaluation can be skipped.
+///
+/// Only sound for `ADD`. A union takes the nearer of the two, so a shape that
+/// cannot get nearer changes nothing; the box is already inflated by the blend
+/// radius, which is the reach of a smooth or chamfered union. Every other mode
+/// needs its own proof: subtract compares `-shape` against the field, and
+/// intersect, push, avoid, emboss, deboss and shell each read the field
+/// through a different formula. Widening this is a per-mode job with a parity
+/// test, not a guess.
+///
+/// Mirrors `shape_cannot_reach` in sdf.wgsl.
+pub(crate) fn shape_cannot_reach(shape: &GpuShape, world_point: Vec3, field: f32) -> bool {
+    shape.blend.mode == GPU_MODE_ADD
+        && shape.cull_scale * cull_box_distance(world_point - shape.center, shape.cull_extent)
+            >= field
+}
+
+/// The cull box and its scale, so that for every point outside the box
+///
+/// ```text
+/// cull_scale * distance_to_box <= shape_distance(shape, point)
+/// ```
+///
+/// A geometric bounding box is **not** enough. `shape_distance` does not
+/// always return the true distance - `ellipsoid_distance` deliberately
+/// underestimates, by as much as the ratio of the longest radius to the
+/// shortest - and a bound the evaluator undercuts culls shapes that were still
+/// about to change the field.
+///
+/// Each brush therefore contributes two things: a box its own estimate is
+/// never nearer than, and the factor by which that estimate can fall short.
+/// The box is then inflated by `blend.radius / cull_scale`, which is what makes
+/// the ADD predicate hold for a smooth or chamfered union as well as a hard
+/// one.
+fn cull_bound(shape: &GpuShape) -> (Vec3, f32) {
+    let size = shape.s.truncate();
+    let (local_extent, scale) = match shape.brush {
+        // The superellipsoid estimate is `(||p/r||e - 1) * min(r)`, which along
+        // the longest axis is only `min(r)/max(r)` of the true distance. Any
+        // norm is at least the infinity norm, so bounding the box by
+        // `sqrt(3) * max(r)` covers every exponent and every direction.
+        GPU_BRUSH_SPHERE => {
+            let reach = 3.0f32.sqrt() * size.max_element();
+            (Vec3::splat(reach), size.min_element() / reach)
+        }
+        // The taper divides the whole distance by `sqrt(1 + slope^2)` to keep
+        // it conservative on the sloped face, so the estimate falls short by
+        // exactly that.
+        GPU_BRUSH_CUBE => {
+            let slope = (shape.r.z * size.x.min(size.z)) / (2.0 * size.y.max(MIN_RADIUS));
+            (size, 1.0 / (1.0 + slope * slope).sqrt())
+        }
+        // Exact: the ellipse is solved by Newton, the rim is an offset.
+        _ => (size, 1.0),
+    };
+    let rotation = Mat3::from_quat(Quat::from_vec4(shape.inverse_rotation).inverse());
+    let unsigned = Mat3::from_cols(
+        rotation.x_axis.abs(),
+        rotation.y_axis.abs(),
+        rotation.z_axis.abs(),
+    );
+    (
+        unsigned * local_extent + Vec3::splat(shape.blend.radius / scale),
+        scale,
+    )
 }

@@ -20,6 +20,54 @@ mod sdf_tests {
         }
     }
 
+    /// Mirrors `ray_march` in sdf.wgsl. `omega` of 1.0 is plain sphere tracing;
+    /// `field` is whatever evaluator is under test, exact or gridded.
+    fn march(
+        field: &dyn Fn(Vec3) -> f32,
+        confirm: &dyn Fn(Vec3) -> f32,
+        origin: Vec3,
+        direction: Vec3,
+        omega: f32,
+        threshold: f32,
+        budget: u32,
+    ) -> (f32, u32) {
+        const STOP: f32 = 60.0;
+
+        let mut travelled = 0.0;
+        let mut steps = 0;
+        let mut relaxation = omega.max(1.0);
+        let mut previous_distance = 0.0;
+        let mut step_length = 0.0;
+
+        while steps < budget {
+            let distance = field(origin + direction * travelled);
+            let overshot = relaxation > 1.0 && (distance.abs() + previous_distance) < step_length;
+            steps += 1;
+
+            // A small distance is not proof of a surface: a grid-clamped field
+            // reports the cell wall, not the geometry. Confirm before stopping.
+            if !overshot
+                && distance < threshold
+                && confirm(origin + direction * travelled) < threshold
+            {
+                return (travelled + distance, steps);
+            }
+            if overshot {
+                step_length *= 1.0 - relaxation;
+                relaxation = 1.0;
+            } else {
+                step_length = distance * relaxation;
+            }
+            previous_distance = distance.abs();
+            travelled += step_length;
+            if travelled >= STOP {
+                break;
+            }
+        }
+        // Out of budget is a miss. Anything else shades a point in mid-air.
+        (STOP, steps)
+    }
+
     /// The authored scene has to survive spawning, not just compile. Without a
     /// `Transform` on the root, propagation never reaches the children and every
     /// shape packs at the origin - which looks exactly like a broken importer.
@@ -586,4 +634,549 @@ mod sdf_tests {
         assert!(actions.just_released(Action::Forward));
         assert!(!actions.pressed(Action::Forward));
     }
+    /// Culling is only allowed to save work, never to change the answer. The
+    /// reference loop here blends every shape unconditionally; the real
+    /// `scene_distance` skips the ones its box test rejects. They must agree
+    /// **exactly** - a skipped ADD contributes nothing at all to `min` or to
+    /// `union_smooth`, so this is bit-for-bit, not approximate.
+    #[test]
+    fn box_culling_never_changes_the_field() {
+        fn uncalled(shapes: &[GpuShape], point: Vec3) -> f32 {
+            let mut field = MAX_MARCH_DISTANCE;
+            for (index, shape) in shapes.iter().enumerate() {
+                let distance = shape_distance(shape, point);
+                field = if index == 0 {
+                    distance
+                } else {
+                    blend(distance, field, &shape.blend, shape.chamfer != 0)
+                };
+            }
+            field
+        }
+
+        // A cheap deterministic generator beats a dependency, and a fixed seed
+        // means a failure is reproducible.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16777216.0 // [0, 1)
+        };
+        macro_rules! spread {
+            ($scale:expr) => {
+                (next() - 0.5) * 2.0 * $scale
+            };
+        }
+
+        for _ in 0..200 {
+            let count = 2 + (next() * 8.0) as usize;
+            let shapes: Vec<GpuShape> = (0..count)
+                .map(|_| {
+                    let kind = (next() * 3.0) as u32;
+                    let shape = match kind {
+                        0 => SdfShape::Sphere,
+                        1 => SdfShape::Cube,
+                        _ => SdfShape::Cylinder,
+                    };
+                    let placement = Transform {
+                        translation: Vec3::new(spread!(4.0), spread!(4.0), spread!(4.0)),
+                        rotation: Quat::from_euler(
+                            EulerRot::XYZ,
+                            spread!(3.14),
+                            spread!(3.14),
+                            spread!(3.14),
+                        ),
+                        scale: Vec3::new(
+                            0.2 + next() * 2.0,
+                            0.2 + next() * 2.0,
+                            0.2 + next() * 2.0,
+                        ),
+                    };
+                    let modifiers = Modifiers {
+                        round: next(),
+                        bevel: next(),
+                        thickness: next(),
+                        cone: next(),
+                        sharpen: next() * 0.9,
+                    };
+                    // Every mode, so the modes that must never be culled are
+                    // exercised as hard as ADD is.
+                    let operation = CsgOperation {
+                        mode: (next() * 9.0) as u32,
+                        chamfer: next() < 0.5,
+                        radius: next() * 0.8,
+                        strength: next() * 0.5,
+                    };
+                    shape.to_gpu(
+                        &GlobalTransform::from(placement),
+                        Some(&modifiers),
+                        Some(&operation),
+                        None,
+                    )
+                })
+                .collect();
+
+            for _ in 0..20 {
+                let point = Vec3::new(spread!(7.0), spread!(7.0), spread!(7.0));
+                let culled = scene_distance(&shapes, point);
+                let full = uncalled(&shapes, point);
+                assert_eq!(
+                    culled, full,
+                    "culling changed the field at {point:?} over {count} shapes"
+                );
+            }
+        }
+    }
+    /// The parity test above passes trivially if nothing is ever culled, so
+    /// pin the predicate down directly: it must fire on a distant ADD, and must
+    /// never fire on a mode whose formula has not been proven safe.
+    #[test]
+    fn the_cull_fires_on_a_distant_add_and_never_on_another_mode() {
+        let far = Vec3::new(30.0, 0.0, 0.0);
+        let near_field = 1.0;
+
+        let added = placed(SdfShape::Cube, Transform::IDENTITY, union(0.0));
+        assert!(shape_cannot_reach(&added, far, near_field));
+        // Close enough to matter: the box is nearer than the field.
+        assert!(!shape_cannot_reach(&added, Vec3::new(1.2, 0.0, 0.0), near_field));
+
+        for mode in [
+            GPU_MODE_SUBTRACT,
+            GPU_MODE_INTERSECT,
+            GPU_MODE_PAINT,
+            GPU_MODE_PUSH,
+            GPU_MODE_AVOID,
+            GPU_MODE_EMBOSS,
+            GPU_MODE_DEBOSS,
+            GPU_MODE_SHELL,
+        ] {
+            let other = placed(
+                SdfShape::Cube,
+                Transform::IDENTITY,
+                CsgOperation {
+                    mode,
+                    ..default()
+                },
+            );
+            assert!(
+                !shape_cannot_reach(&other, far, near_field),
+                "mode {mode} was culled without a proof that it is safe to"
+            );
+        }
+    }
+
+    /// The bound has to survive the shape the ellipsoid estimate is worst on: a
+    /// long thin one, where the returned distance is a fraction of the true
+    /// one. Sampling along the long axis is where a naive box bound breaks.
+    #[test]
+    fn the_cull_bound_holds_under_a_stretched_ellipsoid() {
+        let shape = shaped(
+            SdfShape::Sphere,
+            Transform::from_scale(Vec3::new(4.0, 0.2, 0.2)),
+            Modifiers::default(),
+        );
+        for step in 1..200 {
+            let point = Vec3::new(step as f32 * 0.15, 0.3, -0.2);
+            let bound = shape.cull_scale * cull_box_distance(point - shape.center, shape.cull_extent);
+            assert!(
+                bound <= shape_distance(&shape, point) + 1e-4,
+                "bound {bound} overshot the estimate at {point:?}"
+            );
+        }
+    }
+    /// A count sweep only means something if the scenes cover the same pixels.
+    /// Every brush must stay inside the slab, and the slab the scene fills must
+    /// not grow with the count - which is exactly what the last measurement
+    /// round got wrong.
+    #[test]
+    fn every_bench_count_fills_the_same_slab() {
+        use crate::bench::{SLAB_HALF_SIZE, cells_per_axis, grid_layout};
+
+        for count in [1, 8, 20, 27, 64, 80, 125] {
+            let layout = grid_layout(count);
+            assert_eq!(layout.len(), count);
+
+            let cell = SLAB_HALF_SIZE / cells_per_axis(count) as f32;
+            for placement in &layout {
+                assert_eq!(placement.scale, cell);
+                let corner = placement.translation.abs() + cell;
+                assert!(
+                    corner.cmple(SLAB_HALF_SIZE + Vec3::splat(1e-4)).all(),
+                    "count {count} put a brush corner at {corner:?}, outside {SLAB_HALF_SIZE:?}"
+                );
+            }
+
+            // Full rows reach both ends, so the footprint is the slab itself
+            // and not something that creeps outwards with the count.
+            let widest = layout
+                .iter()
+                .map(|placement| placement.translation.x + cell.x)
+                .fold(f32::MIN, f32::max);
+            assert!((widest - SLAB_HALF_SIZE.x).abs() < 1e-4, "count {count} stopped at {widest}");
+        }
+    }
+    /// The spread scene only measures what it claims to if its boxes stay
+    /// apart: two that touch merge into one blended surface, which is one
+    /// reject instead of two and a different shape to evaluate.
+    #[test]
+    fn spread_boxes_never_touch() {
+        use crate::bench::{SPREAD_HALF_SIZE, spread_layout};
+
+        for count in [8, 20, 80, 125, 256] {
+            let layout = spread_layout(count);
+            assert_eq!(layout.len(), count);
+
+            for placement in &layout {
+                let corner = placement.translation.abs() + placement.scale;
+                assert!(
+                    corner.cmple(SPREAD_HALF_SIZE + Vec3::splat(1e-4)).all(),
+                    "count {count} put a box corner at {corner:?}, outside the volume"
+                );
+            }
+
+            // ponytail: O(n^2) over at most a few hundred boxes, in a test.
+            for (index, one) in layout.iter().enumerate() {
+                for other in &layout[index + 1..] {
+                    let gap = (one.translation - other.translation).abs() - one.scale - other.scale;
+                    assert!(
+                        gap.cmpgt(Vec3::ZERO).any(),
+                        "count {count} overlapped two boxes at {:?} and {:?}",
+                        one.translation,
+                        other.translation
+                    );
+                }
+            }
+        }
+    }
+    /// Over-relaxation is only allowed to make the march *cheaper*, never to
+    /// let it miss something. This mirrors `ray_march` in sdf.wgsl on the CPU
+    /// (the shader cannot be run here) and compares a relaxed march against a
+    /// plain one over random scenes and random rays.
+    ///
+    /// The failure that matters is one-sided: a relaxed march reporting a hit
+    /// **further along the ray** than the plain one means a surface was jumped.
+    #[test]
+    fn over_relaxation_never_marches_past_a_surface() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16777216.0
+        };
+        macro_rules! spread {
+            ($scale:expr) => {
+                (next() - 0.5) * 2.0 * $scale
+            };
+        }
+
+        let mut relaxed_steps = 0u32;
+        let mut plain_steps = 0u32;
+        let mut compared = 0u32;
+
+        for _ in 0..60 {
+            // Unions only. Subtract and intersect are `max`-based, and a max of
+            // two bounds can *overestimate* near the seam - which breaks the
+            // Lipschitz condition over-relaxation rests on, for plain tracing
+            // too. Those seams are a known hazard, not something this test can
+            // paper over.
+            let shapes: Vec<GpuShape> = (0..2 + (next() * 6.0) as usize)
+                .map(|_| {
+                    let kind = (next() * 3.0) as u32;
+                    let shape = match kind {
+                        0 => SdfShape::Sphere,
+                        1 => SdfShape::Cube,
+                        _ => SdfShape::Cylinder,
+                    };
+                    let placement = Transform {
+                        translation: Vec3::new(spread!(6.0), spread!(6.0), spread!(6.0)),
+                        rotation: Quat::from_euler(
+                            EulerRot::XYZ,
+                            spread!(3.14),
+                            spread!(3.14),
+                            spread!(3.14),
+                        ),
+                        scale: Vec3::new(0.3 + next() * 1.5, 0.3 + next() * 1.5, 0.3 + next() * 1.5),
+                    };
+                    let operation = CsgOperation {
+                        radius: next() * 0.5,
+                        ..default()
+                    };
+                    shape.to_gpu(
+                        &GlobalTransform::from(placement),
+                        Some(&Modifiers::default()),
+                        Some(&operation),
+                        None,
+                    )
+                })
+                .collect();
+
+            for _ in 0..40 {
+                let origin = Vec3::new(spread!(14.0), spread!(14.0), spread!(14.0));
+                let direction = (Vec3::new(spread!(1.0), spread!(1.0), spread!(1.0))
+                    - origin.normalize_or_zero() * 0.0)
+                    .normalize_or_zero();
+                if direction == Vec3::ZERO || scene_distance(&shapes, origin) < 0.0 {
+                    continue; // starting inside is its own case, handled by the sign test
+                }
+
+                let evaluate = |point| scene_distance(&shapes, point);
+                let (plain, plain_cost) = march(&evaluate, &evaluate, origin, direction, 1.0, 0.001, 512);
+                let (relaxed, relaxed_cost) =
+                    march(&evaluate, &evaluate, origin, direction, 1.2, 0.001, 512);
+
+                // Half a per-step threshold of slack: the two marches stop at
+                // slightly different points on the same surface.
+                assert!(
+                    relaxed <= plain + 0.05,
+                    "relaxed march ran {relaxed} past the plain hit at {plain}"
+                );
+                plain_steps += plain_cost;
+                relaxed_steps += relaxed_cost;
+                compared += 1;
+            }
+        }
+
+        println!("plain {plain_steps} steps, relaxed {relaxed_steps} over {compared} rays");
+        assert!(compared > 500, "only {compared} rays actually ran");
+        // The whole point is fewer steps. If relaxation costs more than plain
+        // tracing on random scenes, the fallback is thrashing.
+        assert!(
+            relaxed_steps < plain_steps,
+            "relaxed spent {relaxed_steps} steps against plain's {plain_steps}"
+        );
+    }
+    /// The grid is allowed to be pessimistic and must never be optimistic. A
+    /// cell only knows its own shapes, so if it ever reports a *larger*
+    /// distance than the exact field, a march using it steps through geometry.
+    ///
+    /// Every mode is in the scenes, including the ones that read the field
+    /// globally - those must end up in every cell, and this is what catches it
+    /// if they do not.
+    #[test]
+    fn the_grid_never_reports_more_than_the_exact_field() {
+        use crate::field::{build_grid, scene_bounds, scene_distance_gridded};
+
+        let mut state = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16777216.0
+        };
+        macro_rules! spread {
+            ($scale:expr) => {
+                (next() - 0.5) * 2.0 * $scale
+            };
+        }
+
+        for resolution in [1, 4, 16] {
+            for _ in 0..40 {
+                let shapes: Vec<GpuShape> = (0..2 + (next() * 8.0) as usize)
+                    .map(|_| {
+                        let shape = match (next() * 3.0) as u32 {
+                            0 => SdfShape::Sphere,
+                            1 => SdfShape::Cube,
+                            _ => SdfShape::Cylinder,
+                        };
+                        let placement = Transform {
+                            translation: Vec3::new(spread!(8.0), spread!(8.0), spread!(8.0)),
+                            rotation: Quat::from_euler(
+                                EulerRot::XYZ,
+                                spread!(3.14),
+                                spread!(3.14),
+                                spread!(3.14),
+                            ),
+                            scale: Vec3::new(
+                                0.3 + next() * 2.0,
+                                0.3 + next() * 2.0,
+                                0.3 + next() * 2.0,
+                            ),
+                        };
+                        let operation = CsgOperation {
+                            mode: (next() * 9.0) as u32,
+                            chamfer: next() < 0.5,
+                            radius: next() * 0.6,
+                            strength: next() * 0.5,
+                        };
+                        shape.to_gpu(
+                            &GlobalTransform::from(placement),
+                            Some(&Modifiers::default()),
+                            Some(&operation),
+                            None,
+                        )
+                    })
+                    .collect();
+
+                let (bounds_min, bounds_max) = scene_bounds(&shapes);
+                let grid = build_grid(&shapes, bounds_min, bounds_max, resolution);
+
+                for _ in 0..60 {
+                    let point = Vec3::new(spread!(12.0), spread!(12.0), spread!(12.0));
+                    let exact = scene_distance(&shapes, point);
+                    let gridded = scene_distance_gridded(&shapes, &grid, point);
+                    assert!(
+                        gridded <= exact + 1e-4,
+                        "grid at resolution {resolution} reported {gridded} where the field is \
+                         {exact}, at {point:?}"
+                    );
+                }
+            }
+        }
+    }
+    /// Soundness says the grid cannot report too much; this says the march that
+    /// uses it lands in the same place. A grid that is merely conservative
+    /// still has to draw the same picture.
+    #[test]
+    fn a_gridded_march_hits_what_the_exact_one_hits() {
+        use crate::field::{build_grid, scene_bounds, scene_distance_gridded};
+
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16777216.0
+        };
+        macro_rules! spread {
+            ($scale:expr) => {
+                (next() - 0.5) * 2.0 * $scale
+            };
+        }
+
+        let mut compared = 0;
+        let mut exact_steps = 0u32;
+        let mut grid_steps = 0u32;
+
+        for _ in 0..40 {
+            let shapes: Vec<GpuShape> = (0..3 + (next() * 8.0) as usize)
+                .map(|_| {
+                    let shape = match (next() * 3.0) as u32 {
+                        0 => SdfShape::Sphere,
+                        1 => SdfShape::Cube,
+                        _ => SdfShape::Cylinder,
+                    };
+                    let placement = Transform {
+                        translation: Vec3::new(spread!(9.0), spread!(9.0), spread!(9.0)),
+                        rotation: Quat::from_euler(
+                            EulerRot::XYZ,
+                            spread!(3.14),
+                            spread!(3.14),
+                            spread!(3.14),
+                        ),
+                        scale: Vec3::new(0.4 + next() * 1.6, 0.4 + next() * 1.6, 0.4 + next() * 1.6),
+                    };
+                    let operation = CsgOperation {
+                        radius: next() * 0.5,
+                        ..default()
+                    };
+                    shape.to_gpu(
+                        &GlobalTransform::from(placement),
+                        Some(&Modifiers::default()),
+                        Some(&operation),
+                        None,
+                    )
+                })
+                .collect();
+
+            let (bounds_min, bounds_max) = scene_bounds(&shapes);
+            let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+            let exact = |point| scene_distance(&shapes, point);
+            let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+
+            for _ in 0..40 {
+                let origin = Vec3::new(spread!(16.0), spread!(16.0), spread!(16.0));
+                let direction =
+                    Vec3::new(spread!(1.0), spread!(1.0), spread!(1.0)).normalize_or_zero();
+                if direction == Vec3::ZERO || exact(origin) < 0.0 {
+                    continue;
+                }
+
+                // A fat threshold on purpose. The grid clamps to the cell
+                // wall, and the wall margin is small - so with a hit test loose
+                // enough to mistake the margin for geometry, an unconfirmed
+                // gridded march stops in mid-air. This is the shader's own
+                // situation: its threshold grows with distance.
+                let (hit, cost) = march(&exact, &exact, origin, direction, 1.2, 0.05, 512);
+                let (grid_hit, grid_cost) =
+                    march(&gridded, &exact, origin, direction, 1.2, 0.05, 512);
+                assert!(
+                    (hit - grid_hit).abs() < 0.05,
+                    "gridded march stopped at {grid_hit}, exact at {hit}"
+                );
+                exact_steps += cost;
+                grid_steps += grid_cost;
+                compared += 1;
+            }
+        }
+
+        assert!(compared > 300, "only {compared} rays actually ran");
+        println!("exact {exact_steps} steps, gridded {grid_steps} over {compared} rays");
+    }
+    /// Two faults that only show on a long ray *inside* the grid: cells that
+    /// are not cubic, and cells that do not overlap.
+    ///
+    /// A flat world divided by the same count on every axis gives pancake
+    /// cells, and the thinnest axis then sets the step length for every ray -
+    /// on the bench scene that was 0.053 units at a time. A ray running along a
+    /// cell wall crawls for a different reason. Either way it runs out of
+    /// budget and draws as background: a slice of the world missing down the
+    /// middle of the screen, which is what it did.
+    ///
+    /// The ray is aimed **straight down a cell plane at a target it must
+    /// reach**. Two earlier versions of this test let the ray miss, and a miss
+    /// agrees with a miss - they passed against both faults and measured
+    /// nothing.
+    #[test]
+    fn a_long_ray_inside_the_grid_still_arrives() {
+        use crate::field::{build_grid, scene_bounds, scene_distance_gridded};
+        const SHADER_BUDGET: u32 = 128;
+
+        let cube_at = |position: Vec3| {
+            shaped(
+                SdfShape::Cube,
+                Transform {
+                    translation: position,
+                    scale: Vec3::splat(0.8),
+                    ..default()
+                },
+                Modifiers::default(),
+            )
+        };
+        // Wide and flat, like a level. The anchors alone fix the bounds, so the
+        // cell planes do not move when the target is added.
+        let anchors = [
+            cube_at(Vec3::new(-20.0, 0.0, -20.0)),
+            cube_at(Vec3::new(20.0, 0.0, 20.0)),
+        ];
+        let (bounds_min, bounds_max) = scene_bounds(&anchors);
+        let planes = build_grid(&anchors, bounds_min, bounds_max, 16);
+
+        for step in 2..planes.resolution.x - 2 {
+            for nudge in [0.0f32, 0.002, -0.002] {
+                let x = planes.origin.x + planes.cell_size.x * step as f32 + nudge;
+                let mut shapes = anchors.to_vec();
+                shapes.push(cube_at(Vec3::new(x, 0.0, -15.0)));
+
+                let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+                let exact = |point| scene_distance(&shapes, point);
+                let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+
+                let origin = Vec3::new(x, 0.0, 18.0);
+                let direction = Vec3::new(0.0, 0.0, -1.0);
+                let (hit, _) = march(&exact, &exact, origin, direction, 1.2, 0.01, SHADER_BUDGET);
+                let (grid_hit, cost) =
+                    march(&gridded, &exact, origin, direction, 1.2, 0.01, SHADER_BUDGET);
+
+                // Non-vacuous: the exact march has to actually reach the target.
+                assert!(hit < 40.0, "the exact march missed its own target at x {x}");
+                assert!(
+                    (hit - grid_hit).abs() < 0.1,
+                    "at x {x}: exact stopped at {hit}, gridded at {grid_hit} after {cost} steps"
+                );
+            }
+        }
+    }
+
 }

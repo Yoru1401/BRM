@@ -1,7 +1,5 @@
-// Signed distance field renderer: cone marching in the vertex stage, ray
-// marching in the fragment stage, one draw call over a frustum-fitted quad.
-//
-// Technique: https://medium.com/@nabilnymansour/cone-marching-in-three-js-6d54eac17ad4
+// Signed distance field renderer: ray marching in the fragment stage, one draw
+// call over a frustum-fitted quad, against a uniform grid of shape lists.
 //
 // Every function under "the field" is mirrored by one of the same name in
 // src/main.rs, which the physics uses. Both read the same packed `Shape`
@@ -17,11 +15,21 @@ struct RenderParams {
     bounds_min: vec3<f32>,
     tan_half_fov: f32,
     bounds_max: vec3<f32>,
-    vertical_cell_count: f32,
-    cone_padding: f32, // 0 disables the cone pass entirely
+    padding_one: f32,
     shape_count: u32, // the buffer is a fixed size; only this many are real
     debug_view: u32, // 0 = shaded, 1 = march-step heatmap
-    padding: u32,
+    cull: u32, // 0 turns the per-shape box reject off, for measuring it
+    // Over-relaxation factor for the march. 1.0 is plain sphere tracing.
+    omega: f32,
+    grid: u32, // 0 turns the acceleration grid off, for measuring it
+    grid_padding: u32,
+    grid_padding_two: u32,
+    grid_origin: vec3<f32>,
+    grid_padding_three: f32,
+    grid_cell: vec3<f32>, // cubic, so a flat world is not sliced into pancakes
+    grid_padding_four: f32,
+    grid_resolution: vec3<u32>, // cells along each axis
+    grid_padding_five: u32,
 };
 
 /// One primitive, packed by `GpuShape::to_gpu` on the Rust side. Byte layout
@@ -39,6 +47,13 @@ struct Shape {
     inverse_rotation: vec4<f32>, // quaternion, xyzw
     albedo: vec3<f32>, // linear RGB
     chamfer: u32,
+    // Half the axis-aligned box used to reject this shape cheaply. Not the
+    // shape's own bounding box: it is inflated so that cull_scale times the
+    // distance to it is a true lower bound on what shape_distance returns.
+    cull_extent: vec3<f32>,
+    // How much the evaluator can undershoot the real distance. 1.0 where the
+    // primitive is exact, below it where the estimate is conservative.
+    cull_scale: f32,
     blend: Blend,
 };
 
@@ -64,8 +79,14 @@ const MODE_EMBOSS: u32 = 6u;
 const MODE_DEBOSS: u32 = 7u;
 const MODE_SHELL: u32 = 8u;
 
+/// A cell that gave up indexing: evaluate every shape in it.
+const GRID_CELL_FULL: u32 = 4294967295u;
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> render_params: RenderParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> shapes: array<Shape>;
+// Two words per cell: offset into grid_indices, then count.
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> grid_cells: array<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> grid_indices: array<u32>;
 
 const MAX_MARCH_STEPS: i32 = 128;
 const MAX_MARCH_DISTANCE: f32 = 100.0;
@@ -214,8 +235,9 @@ fn tapered_uberprim(local_position: vec3<f32>, s: vec4<f32>, r: vec4<f32>) -> f3
     return uberprim_distance(local_position, narrowed, corner) / sqrt(1.0 + slope * slope);
 }
 
-// ponytail: linear scan, O(shapes) per march step. Fine to ~50 shapes.
-// Needs a spatial grid or BVH before it scales past that.
+// ponytail: still a linear scan over every shape per march step, now with a
+// per-shape box reject in front of the expensive part (ADD only). Needs a
+// spatial grid or BVH to stop touching every shape at all.
 fn shape_distance(shape: Shape, world_position: vec3<f32>) -> f32 {
     let local_position =
         rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
@@ -316,10 +338,39 @@ fn blend_shape(shape: f32, field: f32, blend: Blend, chamfer: bool) -> f32 {
 /// Shapes are applied in order and each one blends against everything before
 /// it, so the first shape simply seeds the field - the editor does not apply an
 /// operation to it either.
+/// Distance to a shape's cull box. Zero inside it, where no useful bound
+/// exists.
+///
+/// Mirrors `cull_box_distance` in field.rs.
+fn cull_box_distance(offset: vec3<f32>, half_extent: vec3<f32>) -> f32 {
+    return length(max(abs(offset) - half_extent, vec3<f32>(0.0)));
+}
+
+/// Whether a shape is far enough away that blending it in would leave the field
+/// exactly as it is, so the expensive evaluation can be skipped.
+///
+/// Only sound for MODE_ADD. A union takes the nearer of the two, so a shape
+/// that cannot get nearer changes nothing; the box is already inflated by
+/// blend.radius / cull_scale, which covers the reach of a smooth or chamfered
+/// union. Every other mode reads the field through a different formula and
+/// needs its own proof. The box and the scale are both built on the CPU by
+/// `cull_bound` in field.rs - the shader only reads them.
+///
+/// Mirrors `shape_cannot_reach` in field.rs.
+fn shape_cannot_reach(shape: Shape, world_position: vec3<f32>, field: f32) -> bool {
+    return render_params.cull != 0u
+        && shape.blend.mode == MODE_ADD
+        && shape.cull_scale * cull_box_distance(world_position - shape.center, shape.cull_extent)
+            >= field;
+}
+
 fn scene_distance(world_position: vec3<f32>) -> f32 {
     var field = MAX_MARCH_DISTANCE;
     for (var i = 0u; i < render_params.shape_count; i++) {
         let shape = shapes[i];
+        if i > 0u && shape_cannot_reach(shape, world_position, field) {
+            continue;
+        }
         let distance = shape_distance(shape, world_position);
         if i == 0u {
             field = distance;
@@ -328,6 +379,99 @@ fn scene_distance(world_position: vec3<f32>) -> f32 {
         }
     }
     return field;
+}
+
+
+/// Cell holding a point, clamped to the grid. Mirrors `SdfGrid::cell_of`.
+fn grid_slot(world_position: vec3<f32>) -> vec3<f32> {
+    return clamp(
+        floor((world_position - render_params.grid_origin) / render_params.grid_cell),
+        vec3<f32>(0.0),
+        vec3<f32>(render_params.grid_resolution - vec3<u32>(1u)),
+    );
+}
+
+fn grid_cell(world_position: vec3<f32>) -> u32 {
+    let slot = grid_slot(world_position);
+    return u32(slot.x)
+        + u32(slot.y) * render_params.grid_resolution.x
+        + u32(slot.z) * render_params.grid_resolution.x * render_params.grid_resolution.y;
+}
+
+/// Whether a point is inside the grid volume at all. Mirrors `SdfGrid::holds`.
+///
+/// Outside it there is no cell to clamp to: the lookup lands in an edge cell
+/// whose wall the point is already past, the wall distance comes out zero, and
+/// the march reads that as a surface. The camera usually starts outside the
+/// scene bounds, so this is the common case.
+fn grid_holds(world_position: vec3<f32>) -> bool {
+    let high = render_params.grid_origin
+        + render_params.grid_cell * vec3<f32>(render_params.grid_resolution);
+    return all(world_position >= render_params.grid_origin) && all(world_position <= high);
+}
+
+/// Distance from a point to the wall of its own cell. Mirrors
+/// `SdfGrid::exit_distance`.
+///
+/// Load-bearing. A cell only knows its own shapes, so its field can be far too
+/// large - the next cell may hold a surface one step away. Clamping to the wall
+/// makes the answer conservative again, because nothing outside the cell can be
+/// reached without crossing it.
+fn grid_exit_distance(world_position: vec3<f32>) -> f32 {
+    let slot = grid_slot(world_position);
+    // Cells overlap by half a cell: the box measured against is bigger than
+    // the box that chose it. A thin margin instead would let a ray travelling
+    // *along* a wall report almost zero at every step, crawl, run out of budget
+    // and vanish - which drew as a slice missing down the middle of the screen.
+    // `build_grid` rasterises every shape into the same overlapping boxes.
+    let overlap = render_params.grid_cell * 0.5;
+    let low = render_params.grid_origin + slot * render_params.grid_cell - overlap;
+    let high = render_params.grid_origin
+        + (slot + vec3<f32>(1.0)) * render_params.grid_cell + overlap;
+    let to_wall = min(world_position - low, high - world_position);
+    return max(min(to_wall.x, min(to_wall.y, to_wall.z)), 0.0);
+}
+
+/// The field, evaluated through the grid. Mirrors `scene_distance_gridded` in
+/// field.rs.
+///
+/// A cell lists, in blend order, shape 0, every shape whose mode is not ADD,
+/// and every ADD shape whose cull box overlaps it. The non-ADD modes are in
+/// every cell because they read the field itself - one of them on the far side
+/// of the level still changes the answer here.
+fn scene_distance_gridded(world_position: vec3<f32>) -> f32 {
+    if render_params.grid == 0u || !grid_holds(world_position) {
+        return scene_distance(world_position);
+    }
+    let cell = grid_cell(world_position);
+    let count = grid_cells[cell * 2u + 1u];
+    // A cell that gave up indexing evaluates everything: slower, never wrong.
+    if count == GRID_CELL_FULL {
+        return scene_distance(world_position);
+    }
+
+    let offset = grid_cells[cell * 2u];
+    var field = MAX_MARCH_DISTANCE;
+    var evaluated = 0u;
+    for (var slot = 0u; slot < count; slot++) {
+        let shape = shapes[grid_indices[offset + slot]];
+        if evaluated > 0u && shape_cannot_reach(shape, world_position, field) {
+            continue;
+        }
+        let distance = shape_distance(shape, world_position);
+        if evaluated == 0u {
+            field = distance;
+        } else {
+            field = blend_shape(distance, field, shape.blend, shape.chamfer != 0u);
+        }
+        evaluated++;
+    }
+
+    // Only a cell already holding every shape may report its field unclamped.
+    if count == render_params.shape_count {
+        return field;
+    }
+    return min(field, grid_exit_distance(world_position));
 }
 
 /// Colour of the nearest shape that puts material there. Kept separate from
@@ -356,10 +500,10 @@ fn scene_albedo(world_position: vec3<f32>) -> vec3<f32> {
 fn surface_normal(surface_point: vec3<f32>) -> vec3<f32> {
     let offset = vec2<f32>(1.0, -1.0) * NORMAL_EPSILON;
     return normalize(
-        offset.xyy * scene_distance(surface_point + offset.xyy) +
-        offset.yyx * scene_distance(surface_point + offset.yyx) +
-        offset.yxy * scene_distance(surface_point + offset.yxy) +
-        offset.xxx * scene_distance(surface_point + offset.xxx)
+        offset.xyy * scene_distance_gridded(surface_point + offset.xyy) +
+        offset.yyx * scene_distance_gridded(surface_point + offset.yyx) +
+        offset.yxy * scene_distance_gridded(surface_point + offset.yxy) +
+        offset.xxx * scene_distance_gridded(surface_point + offset.xxx)
     );
 }
 
@@ -377,80 +521,33 @@ fn scene_bounds_span(ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec2<f3
     return vec2<f32>(max(entry, 0.0), min(exit, MAX_MARCH_DISTANCE));
 }
 
-// ------------------------------------------------- pass 1: cone per vertex
+// ------------------------------------------------------ vertex: just a quad
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
 };
 
-struct ConeResult {
+struct QuadVertex {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
-    @location(1) travelled_and_steps: vec2<f32>,
 };
 
-fn cone_march(ray_origin: vec3<f32>, ray_direction: vec3<f32>, span: vec2<f32>) -> vec2<f32> {
-    if render_params.cone_padding <= 0.0 {
-        return vec2<f32>(span.x, 0.0);
-    }
-    let radius_per_unit_distance = 2.0 * render_params.tan_half_fov
-        / render_params.vertical_cell_count
-        * render_params.cone_padding;
-
-    var travelled = span.x;
-    var steps = 0;
-    var approached_surface = false;
-    loop {
-        if steps >= MAX_MARCH_STEPS {
-            break;
-        }
-        let distance = scene_distance(ray_origin + ray_direction * travelled);
-        let cone_radius = travelled * radius_per_unit_distance;
-        // Stop before stepping: the cone may no longer be empty, and a vertex
-        // that overshoots pushes every pixel in its cell past the surface.
-        if distance < cone_radius {
-            approached_surface = true;
-            break;
-        }
-        if travelled >= span.y {
-            break;
-        }
-        travelled += distance;
-        steps++;
-    }
-    // A vertex that reached the far side of the box without meeting anything
-    // has no head start to offer, and the distance it covered is meaningless to
-    // its neighbours - interpolating it dents the silhouette of whatever they
-    // hit. Only a vertex that came near a surface shares its progress.
-    if !approached_surface {
-        return vec2<f32>(span.x, f32(steps));
-    }
-    return vec2<f32>(travelled, f32(steps));
-}
-
+// A coarse cone-march used to run here, one ray per cell, handing each pixel a
+// head start. The acceleration grid made the per-pixel march cheap enough that
+// it was worth 4% on a sparse scene and nothing on a dense one - against a
+// whole vertex stage, and two of the worst bugs this project has had. Both came
+// from the same root: a vertex value is *interpolated* across its cell, so it
+// has to be conservative for every pixel in that cell, and nothing here can
+// test that. Deleted 2026-08-31; see memory/decision/cone-marching.md.
 @vertex
-fn vertex(vertex: Vertex) -> ConeResult {
-    var result: ConeResult;
+fn vertex(vertex: Vertex) -> QuadVertex {
+    var result: QuadVertex;
     result.world_position = mesh_position_local_to_world(
         get_world_from_local(vertex.instance_index),
         vec4<f32>(vertex.position, 1.0),
     );
     result.clip_position = view.clip_from_world * result.world_position;
-
-    let ray_origin = view.world_position;
-    let ray_direction = normalize(result.world_position.xyz - ray_origin);
-    let span = scene_bounds_span(ray_origin, ray_direction);
-    if span.y < span.x {
-        // Misses the scene box, so there is nothing to skip ahead to. This has
-        // to stay 0 rather than something large: the value is interpolated
-        // across the cell, and a big number here would push the fragments of
-        // every neighbouring pixel - ones that do hit - straight past the
-        // surface. The fragment stage runs its own slab test anyway.
-        result.travelled_and_steps = vec2<f32>(0.0, 0.0);
-    } else {
-        result.travelled_and_steps = cone_march(ray_origin, ray_direction, span);
-    }
     return result;
 }
 
@@ -474,15 +571,53 @@ fn ray_march(
     let precision_per_unit = pixel_radius_per_unit();
     var travelled = start_distance;
     var step = 0;
+
+    // Over-relaxation (Keinert et al., Enhanced Sphere Tracing): step further
+    // than the unbounding sphere allows, then check afterwards that it was
+    // safe. Two consecutive spheres that overlap prove nothing was skipped
+    // between them; two that do not, prove nothing at all - so that is the
+    // failure test, and it is exact wherever the field is a true bound.
+    var relaxation = max(render_params.omega, 1.0);
+    var previous_distance = 0.0;
+    var step_length = 0.0;
+
     loop {
+        // Out of budget is a **miss**, not a surface. Returning wherever the
+        // ray happened to stop makes the fragment stage shade an arbitrary
+        // point in mid-air, which draws as banding across the whole image. It
+        // was always wrong; the grid made it common by crawling cell to cell.
         if step >= step_budget {
+            return vec2<f32>(stop_distance, f32(step));
+        }
+        let distance = scene_distance_gridded(ray_origin + ray_direction * travelled);
+        let overshot = relaxation > 1.0 && (abs(distance) + previous_distance) < step_length;
+        let close_enough = max(SURFACE_THRESHOLD, travelled * precision_per_unit);
+        step++;
+
+        // A hit is only believable when the last step was safe. After an
+        // overshoot this point may be *past* a surface, not on one.
+        //
+        // And a small distance is not proof of a surface: the grid clamps to
+        // the cell wall, so a point near a wall reports the margin, not the
+        // geometry. Confirm against the exact field before stopping. It costs
+        // one full evaluation, and only where a hit already looks likely.
+        if !overshot && distance < close_enough
+            && scene_distance(ray_origin + ray_direction * travelled) < close_enough {
+            travelled += distance;
             break;
         }
-        let distance = scene_distance(ray_origin + ray_direction * travelled);
-        let close_enough = max(SURFACE_THRESHOLD, travelled * precision_per_unit);
-        travelled += distance;
-        step++;
-        if distance < close_enough || travelled >= stop_distance {
+
+        if overshot {
+            // Undo the part of the last step the spheres did not cover, and
+            // finish the ray at plain sphere tracing.
+            step_length = step_length * (1.0 - relaxation);
+            relaxation = 1.0;
+        } else {
+            step_length = distance * relaxation;
+        }
+        previous_distance = abs(distance);
+        travelled += step_length;
+        if travelled >= stop_distance {
             break;
         }
     }
@@ -515,26 +650,20 @@ fn depth_of(world_point: vec3<f32>) -> f32 {
 }
 
 @fragment
-fn fragment(cone: ConeResult) -> FragmentOutput {
+fn fragment(quad: QuadVertex) -> FragmentOutput {
     let ray_origin = view.world_position;
-    let ray_direction = normalize(cone.world_position.xyz - ray_origin);
+    let ray_direction = normalize(quad.world_position.xyz - ray_origin);
     let span = scene_bounds_span(ray_origin, ray_direction);
     var march = vec2<f32>(MAX_MARCH_DISTANCE, 0.0);
     if span.y >= span.x {
-        march = ray_march(
-            max(cone.travelled_and_steps.x, span.x),
-            MAX_MARCH_STEPS - i32(cone.travelled_and_steps.y),
-            ray_origin,
-            ray_direction,
-            span.y,
-        );
+        march = ray_march(span.x, MAX_MARCH_STEPS, ray_origin, ray_direction, span.y);
     }
     let travelled = march.x;
 
     var output: FragmentOutput;
 
     if render_params.debug_view == 1u {
-        let steps_used = cone.travelled_and_steps.y + march.y;
+        let steps_used = march.y;
         output.depth = 0.0;
         output.color = vec4<f32>(heat(steps_used / f32(MAX_MARCH_STEPS)), 1.0);
         return output;

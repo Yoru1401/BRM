@@ -40,7 +40,6 @@ pub(crate) enum Action {
     /// Held while looking around. The rotation itself comes from mouse motion,
     /// which is an axis, not a button.
     Look,
-    ToggleCone,
     ToggleDebugView,
     ToggleQuad,
 }
@@ -69,7 +68,6 @@ impl Default for Bindings {
             (Key(KeyCode::Space), Up),
             (Key(KeyCode::ShiftLeft), Down),
             (Mouse(MouseButton::Right), Look),
-            (Key(KeyCode::KeyC), ToggleCone),
             (Key(KeyCode::KeyH), ToggleDebugView),
             (Key(KeyCode::KeyV), ToggleQuad),
         ])

@@ -78,11 +78,6 @@ fn update_stats(
         .get(&quad_material.0)
         .map(|material| material.render_params.clone())
         .unwrap_or_default();
-    let cone = if render_params.cone_padding > 0.0 {
-        "on"
-    } else {
-        "off"
-    };
     let view = if render_params.debug_view == 1 {
         "steps"
     } else {
@@ -101,11 +96,17 @@ fn update_stats(
     // costing the whole step budget, and any single stray shape sets its size.
     let span = render_params.bounds_max - render_params.bounds_min;
     let shapes = scene.shapes.len();
+    let grid = if render_params.grid == 0 {
+        "off".to_string()
+    } else {
+        let cells = render_params.grid_resolution;
+        format!("{}x{}x{} cells", cells.x, cells.y, cells.z)
+    };
     text.into_inner().0 = format!(
         "{fps:.1} fps avg\n\
          {ms:.3} ms avg\n\
          {width}x{height}\n\
-         cone marching: {cone}  [C]\n\
+         grid: {grid}\n\
          quad: {shown}  [V]\n\
          view: {view}  [H]\n\
          cpu sdf here: {distance_here:.3}\n\
