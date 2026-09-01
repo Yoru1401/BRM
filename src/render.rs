@@ -70,14 +70,13 @@ pub(crate) struct RenderParams {
     pub(crate) grid_resolution: UVec3,
     /// How many of the fixed-size light buffer actually hold lights.
     pub(crate) light_count: u32,
-    /// Steps a shadow ray may take, and whether it marches the exact field
-    /// instead of the grid. Both exist because the shadow march's *register
-    /// footprint* - not the marching - halved occupancy when lights landed,
-    /// and a knob is how that gets narrowed down.
+    /// Steps a shadow ray may take. A knob rather than a constant because the
+    /// shadow march's *register footprint* - not its marching - is what halved
+    /// occupancy when lights landed, and the step count had to be ruled out.
     pub(crate) shadow_steps: u32,
-    pub(crate) shadow_exact: u32,
     pub(crate) shadow_padding: u32,
     pub(crate) shadow_padding_two: u32,
+    pub(crate) shadow_padding_three: u32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -129,7 +128,6 @@ fn spawn_camera(
                     cull: 1,
                     omega: OMEGA,
                     shadow_steps: SHADOW_STEPS,
-                    shadow_exact: 0,
                     grid: 1,
                     ..default()
                 },

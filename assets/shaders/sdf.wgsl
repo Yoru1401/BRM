@@ -31,9 +31,9 @@ struct RenderParams {
     grid_resolution: vec3<u32>, // cells along each axis
     light_count: u32, // how many of the fixed-size light buffer are real
     shadow_steps: u32,
-    shadow_exact: u32, // 1 marches shadows against the exact field, not the grid
     shadow_padding: u32,
     shadow_padding_two: u32,
+    shadow_padding_three: u32,
 };
 
 /// One primitive, packed by `GpuShape::to_gpu` on the Rust side. Byte layout
@@ -681,10 +681,7 @@ fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f3
         if travelled >= far {
             break;
         }
-        var distance = scene_distance_gridded(origin + direction * travelled);
-        if render_params.shadow_exact != 0u {
-            distance = scene_distance(origin + direction * travelled);
-        }
+        let distance = scene_distance_gridded(origin + direction * travelled);
         if distance < SURFACE_THRESHOLD {
             return 0.0;
         }

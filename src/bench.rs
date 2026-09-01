@@ -12,7 +12,6 @@
 //! cargo run --release -- bench spread:80 --lights 8
 //! cargo run --release -- bench spread:80 --lights 8 --shadows 2
 //! cargo run --release -- bench spread:80 --shadows 1 --shadow-steps 12
-//! cargo run --release -- bench spread:80 --shadows 1 --shadow-exact
 //! cargo run --release -- bench empty
 //! ```
 //!
@@ -99,7 +98,6 @@ pub(crate) struct Bench {
     /// the number that moves the frame time.
     pub(crate) shadows: usize,
     pub(crate) shadow_steps: u32,
-    pub(crate) shadow_exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +153,6 @@ pub(crate) fn requested() -> Option<Bench> {
         shadows: value_after("--shadows").map_or(0, |count| count as usize),
         shadow_steps: value_after("--shadow-steps")
             .map_or(crate::render::SHADOW_STEPS, |count| count as u32),
-        shadow_exact: flag("--shadow-exact"),
     })
 }
 
@@ -320,7 +317,6 @@ fn apply_switches(
         material.render_params.cull = u32::from(bench.cull);
         material.render_params.omega = bench.omega;
         material.render_params.shadow_steps = bench.shadow_steps;
-        material.render_params.shadow_exact = u32::from(bench.shadow_exact);
     }
     // The grid is rebuilt from these, so they go to the settings rather than
     // straight into the uniform.
@@ -372,7 +368,7 @@ fn record(
     }
     // Tab separated, one line: two runs diff cleanly.
     println!(
-        "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tlights\t{}\tshadows\t{}\tsteps\t{}\texact\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
+        "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tlights\t{}\tshadows\t{}\tsteps\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
         frames.done + 1,
         shapes.iter().count(),
         if bench.cull { "on" } else { "off" },
@@ -381,7 +377,6 @@ fn record(
         bench.lights,
         bench.shadows,
         bench.shadow_steps,
-        u32::from(bench.shadow_exact),
         at(0.0),
         median,
         at(0.95),

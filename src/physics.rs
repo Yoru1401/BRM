@@ -258,25 +258,30 @@ pub(crate) fn despawn_fallen_bodies(
 }
 
 fn spawn_bodies(mut commands: Commands) {
-    // Three tests, dropped onto whatever the loaded scene puts under them:
-    // a column into the bowl (do they stack, or sink into each other?),
-    // a batch onto the ramp (do they queue single file down the chute?),
-    // a batch onto the top step (do they bounce down and wake each other?).
+    // Three tests, each aimed at a feature of `world_scene` that exists:
+    // a column into the bowl - the cylinder at (-3, _, 2) with a sphere carved
+    // out of it (do they stack, or sink into each other?), a batch into the
+    // open-ended tube at (0, _, -3) (do they fall through, or jam?), and a
+    // batch onto the funnel at (3, _, -3), whose bore narrows to a slit (they
+    // should perch and wedge rather than pass).
+    //
+    // Anything dropped outside the floor slab - x or z beyond 12 - is caught by
+    // `KILL_BELOW` a few seconds later, so these coordinates have to be right.
     let drops = [
-        (Vec3::new(0.0, 9.0, 0.0), 0.45),
-        (Vec3::new(0.3, 11.0, 0.2), 0.40),
-        (Vec3::new(-0.2, 13.0, 0.3), 0.50),
-        (Vec3::new(0.1, 15.0, -0.3), 0.35),
-        (Vec3::new(-0.3, 17.0, -0.1), 0.45),
-        (Vec3::new(0.2, 19.0, 0.1), 0.40),
-        (Vec3::new(-13.0, 9.0, 0.0), 0.35),
-        (Vec3::new(-13.4, 11.0, 0.2), 0.30),
-        (Vec3::new(-12.6, 13.0, -0.2), 0.40),
-        (Vec3::new(-13.2, 15.0, 0.1), 0.35),
-        (Vec3::new(17.0, 8.0, 0.0), 0.40),
-        (Vec3::new(16.6, 10.0, 0.3), 0.30),
-        (Vec3::new(17.4, 12.0, -0.3), 0.35),
-        (Vec3::new(17.0, 14.0, 0.1), 0.45),
+        (Vec3::new(-3.00, 4.0, 2.00), 0.30),
+        (Vec3::new(-2.85, 5.5, 2.10), 0.28),
+        (Vec3::new(-3.15, 7.0, 1.90), 0.32),
+        (Vec3::new(-3.00, 8.5, 2.15), 0.26),
+        (Vec3::new(-2.90, 10.0, 1.85), 0.30),
+        (Vec3::new(-3.10, 11.5, 2.00), 0.28),
+        (Vec3::new(0.00, 5.0, -3.00), 0.35),
+        (Vec3::new(0.15, 6.5, -2.90), 0.30),
+        (Vec3::new(-0.10, 8.0, -3.10), 0.38),
+        (Vec3::new(0.05, 9.5, -3.00), 0.32),
+        (Vec3::new(3.00, 5.0, -3.00), 0.40),
+        (Vec3::new(3.20, 6.5, -2.85), 0.35),
+        (Vec3::new(2.80, 8.0, -3.20), 0.45),
+        (Vec3::new(3.05, 9.5, -3.00), 0.38),
     ];
     for (position, radius) in drops {
         commands.spawn((
