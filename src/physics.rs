@@ -6,7 +6,6 @@
 use bevy::prelude::*;
 
 use crate::field::{Albedo, SdfScene, SdfShape, SphereBody, scene_distance, scene_normal};
-use crate::SPAWN_EXTRAS;
 
 pub(crate) struct PhysicsPlugin;
 
@@ -14,14 +13,12 @@ impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (simulate_bodies, resolve_body_pairs)
+            (simulate_bodies, resolve_body_pairs, despawn_fallen_bodies)
                 .chain()
                 .run_if(static_field_is_ready),
         )
-        .add_systems(Update, draw_body_spin);
-        if SPAWN_EXTRAS {
-            app.add_systems(Startup, spawn_bodies);
-        }
+        .add_systems(Update, draw_body_spin)
+        .add_systems(Startup, spawn_bodies);
     }
 }
 
@@ -48,6 +45,16 @@ const SLEEP_SPIN: f32 = 0.15;
 const SLEEP_CLEARANCE: f32 = 0.02;
 /// Physics bodies get their own colour so they read against imported geometry.
 const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
+/// A body this far under the world is gone, not falling.
+///
+/// Load-bearing for the *renderer*, not for the physics. A body that misses the
+/// floor never stops accelerating, and `scene_bounds` is one AABB over every
+/// shape - so the scene box grows without limit, and the acceleration grid
+/// derives its resolution from that box. Measured on 2026-09-01: four minutes
+/// of runtime took the bounds to 50270 units tall, collapsed the grid to a
+/// single cell across X and Z, and put the frame at 69 ms against 10 with a
+/// healthy grid.
+const KILL_BELOW: f32 = -50.0;
 
 // ================================================================ physics
 
@@ -215,7 +222,7 @@ fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
     }
 }
 
-// =============================================================== holograms
+// ============================================================ debug draw
 
 /// Three short axis lines per body. A sphere in an SDF looks the same however
 /// it is turned, so without these there is no way to see whether it rolls.
@@ -238,6 +245,18 @@ fn draw_body_spin(mut gizmos: Gizmos, bodies: Query<(&SphereBody, &Transform)>) 
 }
 
 /// A few spheres dropped above the origin, to watch the field push back.
+/// Bodies that have left the world, removed. See [`KILL_BELOW`].
+pub(crate) fn despawn_fallen_bodies(
+    mut commands: Commands,
+    fallen: Query<(Entity, &Transform), With<SphereBody>>,
+) {
+    for (entity, placement) in &fallen {
+        if placement.translation.y < KILL_BELOW {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 fn spawn_bodies(mut commands: Commands) {
     // Three tests, dropped onto whatever the loaded scene puts under them:
     // a column into the bowl (do they stack, or sink into each other?),

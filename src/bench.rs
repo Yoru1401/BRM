@@ -17,7 +17,7 @@
 //! ```
 //!
 //! A run parks the camera at a fixed pose, spawns a generated scene instead of
-//! the authored world, skips the bodies and the holograms, throws away the
+//! the authored world, runs no physics and no overlay, throws away the
 //! first frames, then prints one tab-separated line and exits.
 //!
 //! # Why the scenes are generated

@@ -59,7 +59,7 @@ screen coverage.
 | `world` | the authored scene |
 | `input` | `Action`, `Bindings` |
 | `physics` | bodies, contacts, sleep |
-| `ui` | stats overlay, holograms |
+| `ui` | the stats overlay |
 
 Each is a Bevy `Plugin`. `main.rs` is ~80 lines that adds the six of them.
 

@@ -1223,4 +1223,143 @@ mod sdf_tests {
         .to_gpu(&GlobalTransform::IDENTITY);
         assert!(inverted.cos_inner > inverted.cos_outer);
     }
+    /// The soft-shadow ratio needs a **true** distance, and the grid does not
+    /// return one.
+    ///
+    /// `scene_distance_gridded` clamps its answer to the wall of the cell it
+    /// landed in. That is sound for stepping - a ray never steps through
+    /// anything - but Quilez's penumbra reads the same number as "an occluder
+    /// is this close" and darkens for it. Cell walls are a cubic lattice, so
+    /// the darkening is one too: square shadows, whatever shape cast them.
+    ///
+    /// The ray is aimed to miss by a wide margin and the exact field is
+    /// required to call it lit, so the test cannot pass by both sides going
+    /// dark together.
+    #[test]
+    fn the_soft_shadow_ratio_is_not_darkened_by_the_grid() {
+        use crate::field::{build_grid, scene_bounds, scene_distance_gridded};
+
+        const SOFTNESS: f32 = 12.0;
+        const BIAS: f32 = 0.02;
+        const STEPS: u32 = 48;
+
+        // Mirrors `shadow_factor` in sdf.wgsl.
+        let penumbra = |field: &dyn Fn(Vec3) -> f32, origin: Vec3, direction: Vec3, far: f32| {
+            let mut shade = 1.0f32;
+            let mut travelled = BIAS;
+            for _ in 0..STEPS {
+                if travelled >= far {
+                    break;
+                }
+                let distance = field(origin + direction * travelled);
+                if distance < 0.001 {
+                    return 0.0;
+                }
+                shade = shade.min(SOFTNESS * distance / travelled);
+                travelled += distance;
+            }
+            shade.clamp(0.0, 1.0)
+        };
+
+        let shapes = vec![
+            shaped(
+                SdfShape::Cube,
+                Transform {
+                    translation: Vec3::new(0.0, -0.5, 0.0),
+                    scale: Vec3::new(20.0, 1.0, 20.0),
+                    ..default()
+                },
+                Modifiers::default(),
+            ),
+            shaped(
+                SdfShape::Sphere,
+                Transform::from_xyz(0.0, 1.5, 0.0),
+                Modifiers::default(),
+            ),
+        ];
+
+        let (bounds_min, bounds_max) = scene_bounds(&shapes);
+        let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+        let exact = |point| scene_distance(&shapes, point);
+        let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+
+        // Straight up from open air above the floor, well clear of the
+        // sphere. Nothing is in the way of any of these.
+        let sun = Vec3::Y;
+        let mut checked = 0;
+        let mut worst: f32 = 0.0;
+        for step in 0..24 {
+            let across = 4.0 + step as f32 * 0.25;
+            let origin = Vec3::new(across, 2.0, 0.0);
+            let open = penumbra(&exact, origin, sun, 40.0);
+            assert!(
+                open > 0.9,
+                "the exact field shadowed an open ray at x = {across}: {open}"
+            );
+            let through_grid = penumbra(&gridded, origin, sun, 40.0);
+            worst = worst.max(open - through_grid);
+            checked += 1;
+        }
+
+        assert!(checked == 24);
+
+        // The one that matters. A sun low in the sky sends its shadow rays
+        // *along* the level rather than out of it, so they stay inside the grid
+        // for their whole length - and a flat level gives cells that are thin
+        // in y, so the wall is a fraction of a unit away at every step.
+        let grazing = Vec3::new(1.0, 0.25, 0.0).normalize();
+        for step in 0..12 {
+            let along = -9.0 + step as f32 * 0.5;
+            let origin = Vec3::new(along, 1.0, 8.0);
+            let open = penumbra(&exact, origin, grazing, 40.0);
+            assert!(
+                open > 0.9,
+                "the exact field shadowed an open grazing ray at x = {along}: {open}"
+            );
+            worst = worst.max(open - penumbra(&gridded, origin, grazing, 40.0));
+            checked += 1;
+        }
+
+        assert!(
+            worst < 0.05,
+            "the grid darkened an unoccluded ray by {worst} over {checked} rays;              the penumbra is reading cell walls as geometry"
+        );
+    }
+    /// A body that misses the floor must be removed, not left falling.
+    ///
+    /// The renderer is what breaks otherwise: `scene_bounds` is one AABB over
+    /// every shape, so a body accelerating downward forever drags the scene box
+    /// with it and the acceleration grid - whose resolution comes from that box
+    /// - collapses to a single cell across the level.
+    #[test]
+    fn a_body_that_leaves_the_world_is_removed() {
+        let mut app = App::new();
+        app.add_systems(Update, despawn_fallen_bodies);
+
+        let body = |height: f32| {
+            (
+                SphereBody {
+                    radius: 0.5,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    orientation: Quat::IDENTITY,
+                    resting: false,
+                },
+                Transform::from_xyz(0.0, height, 0.0),
+            )
+        };
+        let resting = app.world_mut().spawn(body(1.0)).id();
+        let falling = app.world_mut().spawn(body(-1000.0)).id();
+        // Far down, but still inside the world: a deep pit is not a fall.
+        let deep = app.world_mut().spawn(body(-10.0)).id();
+
+        app.update();
+
+        assert!(app.world().get_entity(resting).is_ok());
+        assert!(app.world().get_entity(deep).is_ok());
+        assert!(
+            app.world().get_entity(falling).is_err(),
+            "a body 1000 units under the world was left in the scene"
+        );
+    }
 }

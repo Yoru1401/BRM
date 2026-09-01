@@ -16,8 +16,8 @@
 //!
 //! Rendering happens on a single quad parented to the camera and fitted to the
 //! frustum, one ray per pixel in the fragment stage. It writes real depth, so
-//! ordinary Bevy 3D entities - the holograms here - share the world and occlude
-//! correctly.
+//! an ordinary Bevy 3D entity would share the world and occlude correctly -
+//! but nothing in the world is one. Everything here is the field.
 //!
 //! # One field, two evaluators
 //!
@@ -52,15 +52,9 @@ mod tests;
 
 use bevy::{prelude::*, window::PresentMode};
 
-/// Physics bodies and holograms, off for timing runs. The bodies are packed
-/// into the same field as everything else, so they are extra shapes in every
-/// march step as well as CPU work of their own - a measurement of the renderer
-/// has to be able to exclude them.
-pub(crate) const SPAWN_EXTRAS: bool = true;
-
 fn main() {
     // `bench <scene>` on the command line measures instead of playing: a
-    // generated scene, a parked camera, and none of the extras. See bench.rs.
+    // generated scene, a parked camera, and no physics or overlay. See bench.rs.
     let bench = bench::requested();
 
     let mut app = App::new();
