@@ -10,6 +10,7 @@ use bevy::{
 
 use crate::input::Action;
 use crate::field::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GpuShape, MAX_SHAPES};
+use crate::light::{GpuLight, MAX_LIGHTS};
 
 pub(crate) struct RenderPlugin;
 
@@ -27,6 +28,9 @@ const QUAD_OVERSCAN: f32 = 1.01; // hair of slack so no gap at screen edge
 /// Over-relaxation factor. 1.0 is plain sphere tracing. Keinert et al. report
 /// 1.2 as a good default; `bench --omega <n>` is how it gets checked here.
 pub(crate) const OMEGA: f32 = 1.2;
+/// Steps a shadow ray may take. A shadow that gives up reads as lit, which is
+/// the forgiving direction.
+pub(crate) const SHADOW_STEPS: u32 = 48;
 
 /// The screen-filling quad. Rebuilt whenever the aspect ratio changes.
 #[derive(Component)]
@@ -64,7 +68,16 @@ pub(crate) struct RenderParams {
     pub(crate) grid_cell: Vec3,
     pub(crate) grid_padding_four: f32,
     pub(crate) grid_resolution: UVec3,
-    pub(crate) grid_padding_five: u32,
+    /// How many of the fixed-size light buffer actually hold lights.
+    pub(crate) light_count: u32,
+    /// Steps a shadow ray may take, and whether it marches the exact field
+    /// instead of the grid. Both exist because the shadow march's *register
+    /// footprint* - not the marching - halved occupancy when lights landed,
+    /// and a knob is how that gets narrowed down.
+    pub(crate) shadow_steps: u32,
+    pub(crate) shadow_exact: u32,
+    pub(crate) shadow_padding: u32,
+    pub(crate) shadow_padding_two: u32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -78,6 +91,8 @@ pub(crate) struct SdfMaterial {
     pub(crate) grid_cells: Handle<ShaderBuffer>,
     #[storage(3, read_only)]
     pub(crate) grid_indices: Handle<ShaderBuffer>,
+    #[storage(4, read_only)]
+    pub(crate) lights: Handle<ShaderBuffer>,
 }
 
 impl Material for SdfMaterial {
@@ -102,6 +117,7 @@ fn spawn_camera(
     // buffer while the bind group still points at the old one.
     let grid_cells = buffers.add(ShaderBuffer::from(vec![0u32; GRID_CELL_WORDS]));
     let grid_indices = buffers.add(ShaderBuffer::from(vec![0u32; GRID_INDEX_WORDS]));
+    let lights = buffers.add(ShaderBuffer::from(vec![GpuLight::default(); MAX_LIGHTS]));
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 2.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -112,12 +128,15 @@ fn spawn_camera(
                 render_params: RenderParams {
                     cull: 1,
                     omega: OMEGA,
+                    shadow_steps: SHADOW_STEPS,
+                    shadow_exact: 0,
                     grid: 1,
                     ..default()
                 },
                 shapes: shapes.clone(),
                 grid_cells: grid_cells.clone(),
                 grid_indices: grid_indices.clone(),
+                lights: lights.clone(),
             })),
             Transform::from_xyz(0.0, 0.0, -QUAD_DIST),
         )],

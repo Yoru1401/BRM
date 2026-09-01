@@ -42,6 +42,7 @@
 mod bench;
 mod field;
 mod input;
+mod light;
 mod physics;
 mod render;
 mod ui;
@@ -76,7 +77,12 @@ fn main() {
     // Input is always registered: the render toggles read `ButtonInput<Action>`,
     // so the plugin that fills it is not optional. A bench run pins the camera
     // every frame instead of leaving it out.
-    .add_plugins((field::FieldPlugin, render::RenderPlugin, input::InputPlugin));
+    .add_plugins((
+        field::FieldPlugin,
+        render::RenderPlugin,
+        light::LightPlugin,
+        input::InputPlugin,
+    ));
 
     match bench {
         Some(bench) => {

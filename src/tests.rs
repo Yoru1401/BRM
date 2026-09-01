@@ -1179,4 +1179,48 @@ mod sdf_tests {
         }
     }
 
+    /// The spot cone is compared as cosines, and cosine runs backwards: the
+    /// inner angle has the *larger* cosine. `smoothstep(cos_outer, cos_inner,
+    /// alignment)` is only a falloff if that ordering holds, and it silently
+    /// inverts the cone if it does not.
+    #[test]
+    fn a_spot_packs_a_cone_that_fades_outwards() {
+        use crate::light::{Light, LightKind};
+
+        let light = Light {
+            kind: LightKind::Spot {
+                inner: 0.25,
+                outer: 0.45,
+            },
+            ..default()
+        };
+        let packed = light.to_gpu(&GlobalTransform::from(
+            Transform::from_xyz(0.0, 5.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
+        ));
+
+        assert!(
+            packed.cos_inner > packed.cos_outer,
+            "inner {} should have the larger cosine, outer is {}",
+            packed.cos_inner,
+            packed.cos_outer
+        );
+        // -Z is forward, so a light above the origin looking at it points down.
+        assert!(
+            packed.direction.dot(Vec3::NEG_Y) > 0.99,
+            "expected it to point down, got {:?}",
+            packed.direction
+        );
+
+        // An outer angle inside the inner one would make the falloff run the
+        // wrong way; it is pushed back out instead.
+        let inverted = Light {
+            kind: LightKind::Spot {
+                inner: 0.5,
+                outer: 0.1,
+            },
+            ..default()
+        }
+        .to_gpu(&GlobalTransform::IDENTITY);
+        assert!(inverted.cos_inner > inverted.cos_outer);
+    }
 }

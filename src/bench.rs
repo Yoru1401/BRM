@@ -9,6 +9,10 @@
 //! cargo run --release -- bench spread:80 --repeat 5
 //! cargo run --release -- bench spread:80 --grid 8
 //! cargo run --release -- bench spread:80 --no-grid
+//! cargo run --release -- bench spread:80 --lights 8
+//! cargo run --release -- bench spread:80 --lights 8 --shadows 2
+//! cargo run --release -- bench spread:80 --shadows 1 --shadow-steps 12
+//! cargo run --release -- bench spread:80 --shadows 1 --shadow-exact
 //! cargo run --release -- bench empty
 //! ```
 //!
@@ -39,6 +43,7 @@
 use bevy::{prelude::*, window::{PresentMode, WindowResolution}};
 
 use crate::field::{Albedo, SdfShape};
+use crate::light::{Light, LightKind};
 use crate::render::{Quad, SdfMaterial};
 use crate::world::SdfWorld;
 
@@ -87,6 +92,14 @@ pub(crate) struct Bench {
     /// reasoned about.
     pub(crate) grid: u32,
     pub(crate) use_grid: bool,
+    /// Point lights ringing the scene. Diffuse is nearly free; the price of a
+    /// light is whether it casts.
+    pub(crate) lights: usize,
+    /// How many of them cast. **One march per shaded pixel each**, so this is
+    /// the number that moves the frame time.
+    pub(crate) shadows: usize,
+    pub(crate) shadow_steps: u32,
+    pub(crate) shadow_exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +151,11 @@ pub(crate) fn requested() -> Option<Bench> {
         repeat: value_after("--repeat").map_or(1, |count| (count as usize).max(1)),
         grid: value_after("--grid").map_or(crate::field::GRID_DEFAULT_RESOLUTION, |n| n as u32),
         use_grid: !flag("--no-grid"),
+        lights: value_after("--lights").map_or(1, |count| count as usize),
+        shadows: value_after("--shadows").map_or(0, |count| count as usize),
+        shadow_steps: value_after("--shadow-steps")
+            .map_or(crate::render::SHADOW_STEPS, |count| count as u32),
+        shadow_exact: flag("--shadow-exact"),
     })
 }
 
@@ -149,7 +167,7 @@ impl Plugin for BenchPlugin {
             .init_resource::<Frames>()
             // PostStartup: the camera and the quad are spawned in Startup, and
             // two systems in one schedule have no order between them.
-            .add_systems(Startup, spawn_bench_scene)
+            .add_systems(Startup, (spawn_bench_scene, spawn_bench_lights))
             .add_systems(PostStartup, apply_switches)
             // PostUpdate, every frame: `fly_camera` is still running, and all
             // 600 recorded frames have to be shot from the same place.
@@ -264,6 +282,30 @@ pub(crate) fn spread_layout(count: usize) -> Vec<Transform> {
         .collect()
 }
 
+/// A ring of point lights around the scene, the first `shadows` of them
+/// casting.
+///
+/// `--lights 0` is allowed and useful: the scene renders on ambient alone, so
+/// the difference against `--lights 1` is the cost of *running* the light path
+/// rather than the cost of the shader containing it.
+fn spawn_bench_lights(mut commands: Commands, bench: Res<Bench>) {
+    let radius = SPREAD_HALF_SIZE.x * 0.5;
+    for index in 0..bench.lights {
+        let turn = index as f32 / bench.lights.max(1) as f32 * std::f32::consts::TAU;
+        commands.spawn((
+            Light {
+                kind: LightKind::Point,
+                colour: Vec3::ONE,
+                intensity: 6.0,
+                range: radius,
+                shadow: index < bench.shadows,
+                ..default()
+            },
+            Transform::from_xyz(turn.cos() * radius, 6.0, turn.sin() * radius),
+        ));
+    }
+}
+
 fn park_camera(camera: Single<&mut Transform, With<Camera3d>>) {
     *camera.into_inner() = Transform::from_translation(BENCH_EYE).looking_at(Vec3::ZERO, Vec3::Y);
 }
@@ -277,6 +319,8 @@ fn apply_switches(
     if let Some(mut material) = materials.get_mut(&quad.0) {
         material.render_params.cull = u32::from(bench.cull);
         material.render_params.omega = bench.omega;
+        material.render_params.shadow_steps = bench.shadow_steps;
+        material.render_params.shadow_exact = u32::from(bench.shadow_exact);
     }
     // The grid is rebuilt from these, so they go to the settings rather than
     // straight into the uniform.
@@ -328,12 +372,16 @@ fn record(
     }
     // Tab separated, one line: two runs diff cleanly.
     println!(
-        "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
+        "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tlights\t{}\tshadows\t{}\tsteps\t{}\texact\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
         frames.done + 1,
         shapes.iter().count(),
         if bench.cull { "on" } else { "off" },
         bench.omega,
         if bench.use_grid { bench.grid.to_string() } else { "off".to_string() },
+        bench.lights,
+        bench.shadows,
+        bench.shadow_steps,
+        u32::from(bench.shadow_exact),
         at(0.0),
         median,
         at(0.95),

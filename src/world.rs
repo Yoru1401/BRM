@@ -5,14 +5,57 @@
 
 use bevy::prelude::*;
 
-use crate::field::{Albedo, CsgOperation, Modifiers, SdfShape, GPU_MODE_SUBTRACT};
+use crate::field::{Albedo, CsgOperation, GPU_MODE_SUBTRACT, Modifiers, SdfShape};
+use crate::light::{Light, LightKind};
 
 pub(crate) struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_world);
+        app.add_systems(Startup, (spawn_world, spawn_lights));
     }
+}
+
+/// One of each kind, so the template shows what a light can do.
+///
+/// Only the sun casts. A shadow is a whole march per shaded pixel, so the lamp
+/// and the spot are lit-only - which is the split a real level wants too, and
+/// the reason `Light::shadow` defaults to off.
+fn spawn_lights(mut commands: Commands) {
+    commands.spawn((
+        Light {
+            kind: LightKind::Directional,
+            colour: Vec3::new(1.0, 0.96, 0.88),
+            intensity: 0.9,
+            shadow: true,
+            softness: 12.0,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 10.0, 0.0).looking_at(Vec3::new(-3.0, 0.0, 1.0), Vec3::Y),
+    ));
+    commands.spawn((
+        Light {
+            kind: LightKind::Point,
+            colour: Vec3::new(1.0, 0.55, 0.2),
+            intensity: 4.0,
+            range: 9.0,
+            ..default()
+        },
+        Transform::from_xyz(3.0, 2.2, 3.0),
+    ));
+    commands.spawn((
+        Light {
+            kind: LightKind::Spot {
+                inner: 0.25,
+                outer: 0.45,
+            },
+            colour: Vec3::new(0.45, 0.7, 1.0),
+            intensity: 12.0,
+            range: 14.0,
+            ..default()
+        },
+        Transform::from_xyz(-4.0, 6.0, 4.0).looking_at(Vec3::new(-3.0, 0.8, 2.0), Vec3::Y),
+    ));
 }
 
 /// Root of the authored world. Its `Children` are the brushes, in the order

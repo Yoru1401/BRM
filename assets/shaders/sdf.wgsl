@@ -29,7 +29,11 @@ struct RenderParams {
     grid_cell: vec3<f32>, // cubic, so a flat world is not sliced into pancakes
     grid_padding_four: f32,
     grid_resolution: vec3<u32>, // cells along each axis
-    grid_padding_five: u32,
+    light_count: u32, // how many of the fixed-size light buffer are real
+    shadow_steps: u32,
+    shadow_exact: u32, // 1 marches shadows against the exact field, not the grid
+    shadow_padding: u32,
+    shadow_padding_two: u32,
 };
 
 /// One primitive, packed by `GpuShape::to_gpu` on the Rust side. Byte layout
@@ -55,6 +59,20 @@ struct Shape {
     // primitive is exact, below it where the estimate is conservative.
     cull_scale: f32,
     blend: Blend,
+};
+
+/// One light. Must match `struct GpuLight` in src/light.rs exactly.
+struct GpuLight {
+    position: vec3<f32>,
+    kind: u32,
+    direction: vec3<f32>, // unit, where it points
+    range: f32,
+    colour: vec3<f32>,
+    intensity: f32,
+    cos_inner: f32, // cosines, so the cone test is a dot product
+    cos_outer: f32,
+    shadow: u32,
+    softness: f32,
 };
 
 struct Blend {
@@ -87,14 +105,26 @@ const GRID_CELL_FULL: u32 = 4294967295u;
 // Two words per cell: offset into grid_indices, then count.
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> grid_cells: array<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> grid_indices: array<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<storage, read> lights: array<GpuLight>;
 
 const MAX_MARCH_STEPS: i32 = 128;
 const MAX_MARCH_DISTANCE: f32 = 100.0;
 const SURFACE_THRESHOLD: f32 = 0.001; // floor for the distance-scaled threshold
 const NORMAL_EPSILON: f32 = 0.0005; // mirrored by SURFACE_EPSILON in main.rs
 const MIN_RADIUS: f32 = 1e-5; // mirrored by MIN_RADIUS in main.rs
-const SUN_DIRECTION: vec3<f32> = vec3<f32>(0.48, 0.8, 0.36);
 const AMBIENT: f32 = 0.05;
+
+const LIGHT_DIRECTIONAL: u32 = 0u;
+const LIGHT_POINT: u32 = 1u;
+const LIGHT_SPOT: u32 = 2u;
+
+/// Where a shadow ray starts, along the normal. Below this the surface shadows
+/// itself: the ray begins inside its own geometry and reports an immediate hit,
+/// which draws as a black stipple over everything lit.
+const SHADOW_BIAS: f32 = 0.02;
+// Steps come from render_params.shadow_steps: a shadow that gives up reads as
+// lit, which is the forgiving direction, so the count is a knob rather than a
+// correctness matter.
 
 // ------------------------------------------------------- the field
 
@@ -634,6 +664,91 @@ fn heat(fraction: f32) -> vec3<f32> {
     );
 }
 
+
+
+/// How much of the light reaches a point, 0 shadowed to 1 clear.
+///
+/// Inigo Quilez's penumbra trick: march toward the light, and track the
+/// smallest ratio of field distance to travelled distance. A ray that squeezes
+/// past an edge returns a partial value, which is a soft shadow for the price
+/// of the march that was already happening. `softness` scales that ratio -
+/// higher is sharper, so it is inverted from what the name suggests on the CPU
+/// side, where it reads as penumbra width.
+fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f32) -> f32 {
+    var shade = 1.0;
+    var travelled = SHADOW_BIAS;
+    for (var step = 0u; step < render_params.shadow_steps; step++) {
+        if travelled >= far {
+            break;
+        }
+        var distance = scene_distance_gridded(origin + direction * travelled);
+        if render_params.shadow_exact != 0u {
+            distance = scene_distance(origin + direction * travelled);
+        }
+        if distance < SURFACE_THRESHOLD {
+            return 0.0;
+        }
+        shade = min(shade, softness * distance / travelled);
+        travelled += distance;
+    }
+    return clamp(shade, 0.0, 1.0);
+}
+
+/// Everything one light adds at a point, shadow included.
+fn light_contribution(light: GpuLight, surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    var to_light = -light.direction;
+    var distance_to_light = MAX_MARCH_DISTANCE;
+    var attenuation = 1.0;
+
+    if light.kind != LIGHT_DIRECTIONAL {
+        let offset = light.position - surface_point;
+        distance_to_light = length(offset);
+        // Out of range is not "very dim", it is nothing: the falloff is scaled
+        // so it reaches zero at `range`, which is what makes the range a real
+        // cull rather than a suggestion.
+        if distance_to_light >= light.range || distance_to_light < 1e-4 {
+            return vec3<f32>(0.0);
+        }
+        to_light = offset / distance_to_light;
+        let fraction = distance_to_light / light.range;
+        let falloff = clamp(1.0 - fraction * fraction, 0.0, 1.0);
+        attenuation = falloff * falloff;
+
+        if light.kind == LIGHT_SPOT {
+            // Inside the inner cone is full, outside the outer is nothing, and
+            // between them it eases rather than stepping.
+            let alignment = dot(light.direction, -to_light);
+            attenuation *= smoothstep(light.cos_outer, light.cos_inner, alignment);
+        }
+    }
+
+    let facing = max(dot(normal, to_light), 0.0);
+    if facing <= 0.0 || attenuation <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    var visibility = 1.0;
+    if light.shadow != 0u {
+        let reach = min(distance_to_light, MAX_MARCH_DISTANCE);
+        visibility = shadow_factor(
+            surface_point + normal * SHADOW_BIAS,
+            to_light,
+            reach,
+            max(light.softness, 1e-3),
+        );
+    }
+    return light.colour * (light.intensity * facing * attenuation * visibility);
+}
+
+/// Every light, added up. Lights out of range cost a length and a compare.
+fn shade(surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    var total = vec3<f32>(AMBIENT);
+    for (var index = 0u; index < render_params.light_count; index++) {
+        total += light_contribution(lights[index], surface_point, normal);
+    }
+    return total;
+}
+
 /// Writing depth is what lets ordinary Bevy 3D entities share this world. The
 /// quad sits one unit from the camera, so without this every SDF pixel would
 /// claim the quad's depth and anything placed in the scene would sort wrong.
@@ -673,10 +788,10 @@ fn fragment(quad: QuadVertex) -> FragmentOutput {
     }
 
     let surface_point = ray_origin + ray_direction * travelled;
-    let sun_strength = max(dot(surface_normal(surface_point), SUN_DIRECTION), 0.0);
     let albedo = scene_albedo(surface_point);
+    let light = shade(surface_point, surface_normal(surface_point));
 
     output.depth = depth_of(surface_point);
-    output.color = vec4<f32>(albedo * (AMBIENT + (1.0 - AMBIENT) * sun_strength), 1.0);
+    output.color = vec4<f32>(albedo * light, 1.0);
     return output;
 }
