@@ -11,8 +11,8 @@ use bevy::{
 };
 use core::time::Duration;
 
-use crate::field::{SdfScene, scene_distance};
-use crate::render::{Quad, SdfMaterial};
+use crate::sdf::field::{SdfScene, scene_distance};
+use crate::sdf::render::{Quad, SdfMaterial};
 
 pub(crate) struct UiPlugin;
 
@@ -29,11 +29,9 @@ impl Plugin for UiPlugin {
     }
 }
 
-/// The FPS / frame-time readout.
 #[derive(Component)]
 struct Stats;
 
-/// The stats readout, top left.
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((
         Stats,

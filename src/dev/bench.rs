@@ -39,12 +39,15 @@
 //! given ray, so this is where the reject should pay - and `--no-cull` is what
 //! turns it off, so the two runs can be compared.
 
-use bevy::{prelude::*, window::{PresentMode, WindowResolution}};
+use bevy::{
+    prelude::*,
+    window::{PresentMode, WindowResolution},
+};
 
-use crate::field::{Albedo, SdfShape};
-use crate::light::{Light, LightKind};
-use crate::render::{Quad, SdfMaterial};
-use crate::world::SdfWorld;
+use crate::game::world::SdfWorld;
+use crate::sdf::field::{Albedo, SdfShape};
+use crate::sdf::light::{Light, LightKind};
+use crate::sdf::render::{Quad, SdfMaterial};
 
 /// Frames to run before recording starts: shader compilation, buffer creation
 /// and the first swapchain frames are all one-offs.
@@ -69,6 +72,8 @@ pub(crate) const SPREAD_HALF_SIZE: Vec3 = Vec3::new(40.0, 6.0, 40.0);
 /// whatever the count is, and small enough that neighbours never touch - two
 /// merged boxes would be one blended surface instead of two rejects.
 const SPREAD_BOX: Vec3 = Vec3::splat(0.8);
+
+// ----------------------------------------------------------- the command line
 
 /// What a run was asked to measure.
 #[derive(Resource, Debug, Clone)]
@@ -145,16 +150,19 @@ pub(crate) fn requested() -> Option<Bench> {
     Some(Bench {
         scene,
         cull: !flag("--no-cull"),
-        omega: value_after("--omega").unwrap_or(crate::render::OMEGA),
+        omega: value_after("--omega").unwrap_or(crate::sdf::render::OMEGA),
         repeat: value_after("--repeat").map_or(1, |count| (count as usize).max(1)),
-        grid: value_after("--grid").map_or(crate::field::GRID_DEFAULT_RESOLUTION, |n| n as u32),
+        grid: value_after("--grid")
+            .map_or(crate::sdf::field::GRID_DEFAULT_RESOLUTION, |n| n as u32),
         use_grid: !flag("--no-grid"),
         lights: value_after("--lights").map_or(1, |count| count as usize),
         shadows: value_after("--shadows").map_or(0, |count| count as usize),
         shadow_steps: value_after("--shadow-steps")
-            .map_or(crate::render::SHADOW_STEPS, |count| count as u32),
+            .map_or(crate::sdf::render::SHADOW_STEPS, |count| count as u32),
     })
 }
+
+// -------------------------------------------------------------------- the run
 
 pub(crate) struct BenchPlugin(pub(crate) Bench);
 
@@ -189,6 +197,8 @@ pub(crate) fn bench_window() -> Window {
         ..default()
     }
 }
+
+// ----------------------------------------------------------------- the scenes
 
 /// Boxes filling `SLAB_HALF_SIZE`, laid out so the count changes and the
 /// silhouette does not.
@@ -309,7 +319,7 @@ fn park_camera(camera: Single<&mut Transform, With<Camera3d>>) {
 
 fn apply_switches(
     bench: Res<Bench>,
-    mut grid: ResMut<crate::field::GridSettings>,
+    mut grid: ResMut<crate::sdf::field::GridSettings>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
 ) {
@@ -320,11 +330,13 @@ fn apply_switches(
     }
     // The grid is rebuilt from these, so they go to the settings rather than
     // straight into the uniform.
-    *grid = crate::field::GridSettings {
+    *grid = crate::sdf::field::GridSettings {
         resolution: bench.grid,
         enabled: bench.use_grid,
     };
 }
+
+// ------------------------------------------------------------------ measuring
 
 #[derive(Resource, Default)]
 struct Frames {
@@ -373,7 +385,11 @@ fn record(
         shapes.iter().count(),
         if bench.cull { "on" } else { "off" },
         bench.omega,
-        if bench.use_grid { bench.grid.to_string() } else { "off".to_string() },
+        if bench.use_grid {
+            bench.grid.to_string()
+        } else {
+            "off".to_string()
+        },
         bench.lights,
         bench.shadows,
         bench.shadow_steps,

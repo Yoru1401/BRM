@@ -2,7 +2,7 @@
 // call over a frustum-fitted quad, against a uniform grid of shape lists.
 //
 // Every function under "the field" is mirrored by one of the same name in
-// src/main.rs, which the physics uses. Both read the same packed `Shape`
+// src/sdf/field.rs, which the physics uses. Both read the same packed `Shape`
 // values, so only the arithmetic can drift. Change one, change the other.
 //
 // The exception is `ray_march`: it relaxes its hit threshold with distance
@@ -37,7 +37,7 @@ struct RenderParams {
 };
 
 /// One primitive, packed by `GpuShape::to_gpu` on the Rust side. Byte layout
-/// must match `struct GpuShape` in src/main.rs exactly.
+/// must match `struct GpuShape` in src/sdf/field.rs exactly.
 struct Shape {
     center: vec3<f32>,
     brush: u32,
@@ -61,7 +61,7 @@ struct Shape {
     blend: Blend,
 };
 
-/// One light. Must match `struct GpuLight` in src/light.rs exactly.
+/// One light. Must match `struct GpuLight` in src/sdf/light.rs exactly.
 struct GpuLight {
     position: vec3<f32>,
     kind: u32,
@@ -110,8 +110,8 @@ const GRID_CELL_FULL: u32 = 4294967295u;
 const MAX_MARCH_STEPS: i32 = 128;
 const MAX_MARCH_DISTANCE: f32 = 100.0;
 const SURFACE_THRESHOLD: f32 = 0.001; // floor for the distance-scaled threshold
-const NORMAL_EPSILON: f32 = 0.0005; // mirrored by SURFACE_EPSILON in main.rs
-const MIN_RADIUS: f32 = 1e-5; // mirrored by MIN_RADIUS in main.rs
+const NORMAL_EPSILON: f32 = 0.0005; // mirrored by SURFACE_EPSILON in field.rs
+const MIN_RADIUS: f32 = 1e-5; // mirrored by MIN_RADIUS in field.rs
 const AMBIENT: f32 = 0.05;
 
 const LIGHT_DIRECTIONAL: u32 = 0u;
@@ -126,7 +126,7 @@ const SHADOW_BIAS: f32 = 0.02;
 // lit, which is the forgiving direction, so the count is a knob rather than a
 // correctness matter.
 
-// ------------------------------------------------------- the field
+// ------------------------------------------------------------------ the field
 
 /// Rotates a vector by a quaternion without building a matrix: two cross
 /// products beat nine multiplies and a normalize.
@@ -265,9 +265,6 @@ fn tapered_uberprim(local_position: vec3<f32>, s: vec4<f32>, r: vec4<f32>) -> f3
     return uberprim_distance(local_position, narrowed, corner) / sqrt(1.0 + slope * slope);
 }
 
-// ponytail: still a linear scan over every shape per march step, now with a
-// per-shape box reject in front of the expensive part (ADD only). Needs a
-// spatial grid or BVH to stop touching every shape at all.
 fn shape_distance(shape: Shape, world_position: vec3<f32>) -> f32 {
     let local_position =
         rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
@@ -281,7 +278,7 @@ fn shape_distance(shape: Shape, world_position: vec3<f32>) -> f32 {
     return tapered_uberprim(local_position, shape.s, shape.r);
 }
 
-// ---------------------------------------------------------- blend operations
+// ----------------------------------------------------------- blend operations
 
 // Every operation takes the incoming shape first and the field built so far
 // second, matching blend_op_ex in the editor's sdf.glsl.
@@ -331,7 +328,6 @@ fn op_subtract(shape: f32, field: f32, radius: f32, chamfer: bool) -> f32 {
     return max(field, -shape);
 }
 
-/// Combines one shape with everything already in the field.
 fn blend_shape(shape: f32, field: f32, blend: Blend, chamfer: bool) -> f32 {
     let radius = blend.radius;
     let strength = blend.strength;
@@ -365,9 +361,8 @@ fn blend_shape(shape: f32, field: f32, blend: Blend, chamfer: bool) -> f32 {
     }
 }
 
-/// Shapes are applied in order and each one blends against everything before
-/// it, so the first shape simply seeds the field - the editor does not apply an
-/// operation to it either.
+// ------------------------------------------------------------------ the scene
+
 /// Distance to a shape's cull box. Zero inside it, where no useful bound
 /// exists.
 ///
@@ -394,6 +389,18 @@ fn shape_cannot_reach(shape: Shape, world_position: vec3<f32>, field: f32) -> bo
             >= field;
 }
 
+/// Every shape, in blend order, with the box reject in front of the expensive
+/// part. Each blends against everything before it, so the first simply seeds
+/// the field - the editor does not apply an operation to it either.
+///
+/// `scene_distance_gridded` is what the camera march calls; this is the
+/// fallback for a point outside the grid, and the definition the grid must
+/// agree with.
+///
+/// ponytail: linear over the whole scene. The grid is what keeps that off the
+/// hot path, so the ceiling here is a cell that lists most of the scene - a
+/// level built as one giant brush, or too many non-ADD modes, which are in
+/// every cell by construction.
 fn scene_distance(world_position: vec3<f32>) -> f32 {
     var field = MAX_MARCH_DISTANCE;
     for (var i = 0u; i < render_params.shape_count; i++) {
@@ -411,6 +418,7 @@ fn scene_distance(world_position: vec3<f32>) -> f32 {
     return field;
 }
 
+// ------------------------------------------------------------------- the grid
 
 /// Cell holding a point, clamped to the grid. Mirrors `SdfGrid::cell_of`.
 fn grid_slot(world_position: vec3<f32>) -> vec3<f32> {
@@ -504,6 +512,93 @@ fn scene_distance_gridded(world_position: vec3<f32>) -> f32 {
     return min(field, grid_exit_distance(world_position));
 }
 
+/// One shape's contribution to the shadow proxy: the cheapest shape that still
+/// *contains* the real one, in the real one's own frame.
+///
+/// Containment is the whole argument. A shape that swallows another is never
+/// further from a point than the shape inside it, so this can only report a
+/// shorter distance than the field - which a march may act on, because acting
+/// early is stopping early.
+///
+/// Deliberately not `cull_extent`: that box carries the blend radius and is
+/// axis-aligned about `center`, which drew shadows several times the size of
+/// what cast them and slabs where a rotated plate stood.
+///
+/// Non-ADD modes sit this out. They read the field rather than adding to it, so
+/// nothing about their own extent bounds what they do to it.
+fn shadow_proxy_bound(shape: Shape, world_position: vec3<f32>) -> f32 {
+    if shape.blend.mode != MODE_ADD {
+        return MAX_MARCH_DISTANCE;
+    }
+    let local = rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
+
+    if shape.brush == BRUSH_SPHERE {
+        // The field's own estimate. It is already compiled in for the camera
+        // march and costs three `pow`, nothing like the uberprim.
+        return ellipsoid_distance(local, shape.s.xyz, shape.s.w);
+    }
+    if shape.brush == BRUSH_CYLINDER {
+        // A round cross-section at the wider radius, which contains the ellipse
+        // the shape actually has - and is exact for a round cylinder, which is
+        // most of them. `ellipse_distance` is five Newton steps and is the one
+        // thing in the field more expensive than the uberprim.
+        let radial = length(local.xz) - max(shape.s.x, shape.s.z);
+        let edge = vec2<f32>(radial, abs(local.y) - shape.s.y);
+        return min(max(edge.x, edge.y), 0.0) + length(max(edge, vec2<f32>(0.0)));
+    }
+    // Every cube modifier only ever removes material - round and bevel cut the
+    // edges, cone narrows the top, thickness hollows an interior nothing sees
+    // from outside. So the plain box contains all of them, and is exact for a
+    // cube nobody has touched.
+    return cull_box_distance(local, shape.s.xyz);
+}
+
+/// A lower bound on the field, from cull boxes alone. Mirrors
+/// `shadow_proxy_distance` in field.rs.
+///
+/// This exists so that `shape_distance` is called from **one** place in this
+/// shader. A second call site costs 13.9 ms on `spread:80` through register
+/// pressure alone - whether or not a light casts, and whether the shadow march
+/// takes 12 steps or 48. Measured 2026-09-01, table in memory/reference/lights.md.
+///
+/// Still wrong in two visible ways, both of them shape rather than size. A cube
+/// with a heavy round or taper casts the shadow of the box it started as. And
+/// only ADD contributes, so a hole carved by SUBTRACT does not let light
+/// through - which needs the field, and the field is what this avoids.
+fn shadow_proxy_distance(world_position: vec3<f32>) -> f32 {
+    var field = MAX_MARCH_DISTANCE;
+    var count = 0u;
+    var offset = 0u;
+    var indexed = false;
+
+    if render_params.grid != 0u && grid_holds(world_position) {
+        let cell = grid_cell(world_position);
+        count = grid_cells[cell * 2u + 1u];
+        if count != GRID_CELL_FULL {
+            offset = grid_cells[cell * 2u];
+            indexed = true;
+        }
+    }
+
+    if !indexed {
+        for (var i = 0u; i < render_params.shape_count; i++) {
+            field = min(field, shadow_proxy_bound(shapes[i], world_position));
+        }
+        return field;
+    }
+
+    for (var slot = 0u; slot < count; slot++) {
+        let shape = shapes[grid_indices[offset + slot]];
+        field = min(field, shadow_proxy_bound(shape, world_position));
+    }
+    if count == render_params.shape_count {
+        return field;
+    }
+    return min(field, grid_exit_distance(world_position));
+}
+
+// ------------------------------------------------------------ surface queries
+
 /// Colour of the nearest shape that puts material there. Kept separate from
 /// `scene_distance` on purpose: marching only needs the distance, and carrying
 /// a colour through every step of every ray costs far more than one lookup at
@@ -526,7 +621,7 @@ fn scene_albedo(world_position: vec3<f32>) -> vec3<f32> {
 }
 
 /// Surface normal of the field, from four taps arranged as a tetrahedron
-/// instead of six along the axes. Mirrors `scene_normal` in main.rs.
+/// instead of six along the axes. Mirrors `scene_normal` in field.rs.
 fn surface_normal(surface_point: vec3<f32>) -> vec3<f32> {
     let offset = vec2<f32>(1.0, -1.0) * NORMAL_EPSILON;
     return normalize(
@@ -551,7 +646,7 @@ fn scene_bounds_span(ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec2<f3
     return vec2<f32>(max(entry, 0.0), min(exit, MAX_MARCH_DISTANCE));
 }
 
-// ------------------------------------------------------ vertex: just a quad
+// -------------------------------------------------------- vertex: just a quad
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -581,7 +676,7 @@ fn vertex(vertex: Vertex) -> QuadVertex {
     return result;
 }
 
-// ------------------------------------------------- pass 2: ray per pixel
+// ---------------------------------------------------- fragment: ray per pixel
 
 // Half a pixel, measured at one unit of distance. Anything smaller than this
 // cannot be seen, so chasing it is wasted marching - which is exactly what a
@@ -664,12 +759,12 @@ fn heat(fraction: f32) -> vec3<f32> {
     );
 }
 
-
-
 /// How much of the light reaches a point, 0 shadowed to 1 clear.
 ///
 /// Inigo Quilez's penumbra trick: march toward the light, and track the
-/// smallest ratio of field distance to travelled distance. A ray that squeezes
+/// smallest ratio of distance to travelled distance. What it marches against is
+/// [`shadow_proxy_distance`], not the field - see there for why, and for what
+/// that costs in accuracy. A ray that squeezes
 /// past an edge returns a partial value, which is a soft shadow for the price
 /// of the march that was already happening. `softness` scales that ratio -
 /// higher is sharper, so it is inverted from what the name suggests on the CPU
@@ -681,7 +776,7 @@ fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f3
         if travelled >= far {
             break;
         }
-        let distance = scene_distance_gridded(origin + direction * travelled);
+        let distance = shadow_proxy_distance(origin + direction * travelled);
         if distance < SURFACE_THRESHOLD {
             return 0.0;
         }

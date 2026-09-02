@@ -8,7 +8,7 @@ Bevy 0.19.1, Rust edition 2024.
 ## What it does
 
 One SDF, evaluated twice from the **same packed bytes**: on the GPU in
-`assets/shaders/sdf.wgsl` for rendering, on the CPU in `src/field.rs` for
+`assets/shaders/sdf.wgsl` for rendering, on the CPU in `src/sdf/field.rs` for
 physics. There is no separate collision geometry to keep in step.
 
 - **Rendering** — ray marching on a single frustum-fitted quad, one ray per
@@ -42,26 +42,45 @@ Debug builds are misleading: `debug-assertions` are profile-wide and put a
 ```sh
 cargo run --release -- bench empty        # the march against an empty field
 cargo run --release -- bench grid:20      # 20 boxes tiling a fixed slab
-cargo run --release -- bench spread:80      # 80 boxes scattered over a level
+cargo run --release -- bench spread:80    # 80 boxes scattered over a level
 cargo run --release -- bench spread:80 --no-grid --repeat 3
 ```
 
 Prints one tab-separated line of min / median / p95 frame ms and exits. The
 count scenes tile the same volume, so only the shape count changes - not the
-screen coverage.
+screen coverage. Use `--repeat 4` and read run 3 or later: the first block is
+still warming up, and can catch the shader before it has loaded.
+
+## Screenshot
+
+```sh
+cargo run --release -- shot out.png
+```
+
+The authored world, camera parked, physics and overlay off. Two builds differ
+only where the shader does, which is what makes an A/B of a rendering change
+readable.
 
 ## Layout
 
+Three folders, by who is allowed to know about whom.
+
 | module | owns |
 |---|---|
-| `field` | shapes, packing, the acceleration grid, the field on CPU. Depends on nothing |
-| `render` | material, quad fitting, debug views |
-| `world` | the authored scene |
-| `input` | `Action`, `Bindings` |
-| `physics` | bodies, contacts, sleep |
-| `ui` | the stats overlay |
+| `sdf/field` | shapes, packing, the acceleration grid, the field on CPU. Depends on nothing |
+| `sdf/render` | material, quad fitting, debug views |
+| `sdf/light` | point / directional / spot, opt-in soft shadows |
+| `game/world` | the authored scene |
+| `game/physics` | bodies, contacts, sleep |
+| `game/input` | `Action`, `Bindings` |
+| `game/ui` | the stats overlay |
+| `dev/bench` | generated scenes, frame timing |
+| `dev/tests` | the test suite |
 
-Each is a Bevy `Plugin`. `main.rs` is ~80 lines that adds the six of them.
+Every module but `dev/tests` is a Bevy `Plugin`; `main.rs` is ~100 lines
+that adds them. Nothing under
+`sdf/` knows a game exists, so a `bench` run loads that folder alone - which is
+what makes a frame time attributable to the renderer.
 
 ## Tests
 

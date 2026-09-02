@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 
-use crate::field::{Albedo, SdfScene, SdfShape, SphereBody, scene_distance, scene_normal};
+use crate::sdf::field::{Albedo, SdfScene, SdfShape, SphereBody, scene_distance, scene_normal};
 
 pub(crate) struct PhysicsPlugin;
 
@@ -43,7 +43,7 @@ const SLEEP_SPEED: f32 = 0.05;
 const SLEEP_SPIN: f32 = 0.15;
 /// A parked body wakes once the surface under it has moved this far away.
 const SLEEP_CLEARANCE: f32 = 0.02;
-/// Physics bodies get their own colour so they read against imported geometry.
+/// Bodies get their own colour so they read against the authored world.
 const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
 /// A body this far under the world is gone, not falling.
 ///
@@ -56,7 +56,7 @@ const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
 /// healthy grid.
 const KILL_BELOW: f32 = -50.0;
 
-// ================================================================ physics
+// ----------------------------------------------------------------- simulation
 
 /// The scene asset loads asynchronously and the first frames are spent building
 /// pipelines. Until statics exist the field reads as empty everywhere, so
@@ -222,7 +222,7 @@ fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
     }
 }
 
-// ============================================================ debug draw
+// ----------------------------------------------------------------- debug draw
 
 /// Three short axis lines per body. A sphere in an SDF looks the same however
 /// it is turned, so without these there is no way to see whether it rolls.
@@ -244,7 +244,8 @@ fn draw_body_spin(mut gizmos: Gizmos, bodies: Query<(&SphereBody, &Transform)>) 
     }
 }
 
-/// A few spheres dropped above the origin, to watch the field push back.
+// ------------------------------------------------------- spawning and removal
+
 /// Bodies that have left the world, removed. See [`KILL_BELOW`].
 pub(crate) fn despawn_fallen_bodies(
     mut commands: Commands,
@@ -257,6 +258,7 @@ pub(crate) fn despawn_fallen_bodies(
     }
 }
 
+/// A few spheres dropped above the origin, to watch the field push back.
 fn spawn_bodies(mut commands: Commands) {
     // Three tests, each aimed at a feature of `world_scene` that exists:
     // a column into the bowl - the cylinder at (-3, _, 2) with a sphere carved

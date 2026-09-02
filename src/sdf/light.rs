@@ -17,7 +17,7 @@ use bevy::{
     render::{render_resource::ShaderType, storage::ShaderBuffer},
 };
 
-use crate::render::{Quad, SdfMaterial};
+use crate::sdf::render::{Quad, SdfMaterial};
 
 pub(crate) struct LightPlugin;
 

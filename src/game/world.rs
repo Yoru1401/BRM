@@ -5,8 +5,8 @@
 
 use bevy::prelude::*;
 
-use crate::field::{Albedo, CsgOperation, GPU_MODE_SUBTRACT, Modifiers, SdfShape};
-use crate::light::{Light, LightKind};
+use crate::sdf::field::{Albedo, CsgOperation, GPU_MODE_SUBTRACT, Modifiers, SdfShape};
+use crate::sdf::light::{Light, LightKind};
 
 pub(crate) struct WorldPlugin;
 
@@ -66,8 +66,6 @@ pub(crate) struct SdfWorld;
 fn spawn_world(mut commands: Commands) {
     commands.spawn_scene(world_scene());
 }
-
-// ============================================================ authored world
 
 /// The world, written as a scene rather than imported.
 ///

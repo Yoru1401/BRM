@@ -19,12 +19,23 @@
 //! an ordinary Bevy 3D entity would share the world and occlude correctly -
 //! but nothing in the world is one. Everything here is the field.
 //!
+//! # Where things live
+//!
+//! | folder | what is in it |
+//! |--------|---------------|
+//! | `sdf/` | the field, the ray march, the lights - no game in it |
+//! | `game/` | the authored world, bodies, controls, overlay |
+//! | `dev/` | measurement and tests, never reached by a player |
+//!
+//! A `bench` run adds `sdf/` and nothing from `game/`, which is what makes a
+//! frame time attributable to the renderer.
+//!
 //! # One field, two evaluators
 //!
 //! `scene_distance` exists twice: once in `assets/shaders/sdf.wgsl` for
-//! rendering, once here for physics. Both read the **same packed `GpuShape`
-//! values**, so only the arithmetic can drift, never the data. Change one,
-//! change the other in the same commit. The CPU side is covered by closed-form
+//! rendering, once in `sdf/field.rs` for physics. Both read the **same packed
+//! `GpuShape` values**, so only the arithmetic can drift, never the data.
+//! Change one, change the other in the same commit. The CPU side is covered by closed-form
 //! tests, and the overlay's `cpu sdf here` readout is the live alarm: it must
 //! reach zero exactly as the camera touches what the GPU drew.
 //!
@@ -38,33 +49,27 @@
 //! | `V` | hide the quad, revealing Bevy's own per-frame cost |
 //! | `H` | shaded / march-step heatmap |
 
-
-mod bench;
-mod field;
-mod input;
-mod light;
-mod physics;
-mod render;
-mod ui;
-mod world;
-#[cfg(test)]
-mod tests;
+mod dev;
+mod game;
+mod sdf;
 
 use bevy::{prelude::*, window::PresentMode};
 
 fn main() {
-    // `bench <scene>` on the command line measures instead of playing: a
-    // generated scene, a parked camera, and no physics or overlay. See bench.rs.
-    let bench = bench::requested();
+    // Two command-line modes measure or photograph instead of playing, and
+    // both drop whatever would drift between two runs. See dev::bench and
+    // dev::shot.
+    let bench = dev::bench::requested();
+    let shot = dev::shot::requested();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(match &bench {
-            Some(_) => bench::bench_window(),
-            None => Window {
+        primary_window: Some(match (&bench, &shot) {
+            (None, None) => Window {
                 present_mode: PresentMode::AutoNoVsync, // honest FPS numbers
                 ..default()
             },
+            _ => dev::bench::bench_window(),
         }),
         ..default()
     }))
@@ -72,18 +77,29 @@ fn main() {
     // so the plugin that fills it is not optional. A bench run pins the camera
     // every frame instead of leaving it out.
     .add_plugins((
-        field::FieldPlugin,
-        render::RenderPlugin,
-        light::LightPlugin,
-        input::InputPlugin,
+        sdf::field::FieldPlugin,
+        sdf::render::RenderPlugin,
+        sdf::light::LightPlugin,
+        game::input::InputPlugin,
     ));
 
-    match bench {
-        Some(bench) => {
-            app.add_plugins(bench::BenchPlugin(bench));
+    match (bench, shot) {
+        // A bench run generates its own scene, so it takes nothing from `game`.
+        (Some(bench), _) => {
+            app.add_plugins(dev::bench::BenchPlugin(bench));
         }
-        None => {
-            app.add_plugins((world::WorldPlugin, physics::PhysicsPlugin, ui::UiPlugin));
+        // A shot run wants the authored world, but not the bodies falling
+        // through it or the overlay on top: both would differ between two runs
+        // that were meant to differ only in the shader.
+        (None, Some(path)) => {
+            app.add_plugins((game::world::WorldPlugin, dev::shot::ShotPlugin(path)));
+        }
+        (None, None) => {
+            app.add_plugins((
+                game::world::WorldPlugin,
+                game::physics::PhysicsPlugin,
+                game::ui::UiPlugin,
+            ));
         }
     }
     app.run();

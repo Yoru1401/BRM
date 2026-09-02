@@ -13,9 +13,8 @@ use bevy::{
     render::{render_resource::ShaderType, storage::ShaderBuffer},
 };
 
-use crate::render::{SdfMaterial, Quad};
-use crate::world::SdfWorld;
-
+use crate::game::world::SdfWorld;
+use crate::sdf::render::{Quad, SdfMaterial};
 
 pub(crate) struct FieldPlugin;
 
@@ -39,6 +38,8 @@ const MIN_RADIUS: f32 = 1e-5;
 /// still points at the old one, so the shader reads a stale, truncated scene.
 /// ponytail: fixed ceiling. Raise it, or grow-and-rebind, when scenes get big.
 pub(crate) const MAX_SHAPES: usize = 256;
+
+// ----------------------------------------------------------------- components
 
 /// Which primitive a shape is. The unit shape only; its size lives in the
 /// entity's `Transform`, exactly as SDF Modeler stores scale separately.
@@ -95,6 +96,8 @@ impl Default for CsgOperation {
         }
     }
 }
+
+// ------------------------------------------------------------ the packed form
 
 /// The blend half of `GpuShape`, split out so both halves stay readable and the
 /// struct keeps its 16-byte rows.
@@ -200,6 +203,8 @@ impl Default for Albedo {
 
 const DEFAULT_ALBEDO: Vec3 = Vec3::new(1.0, 0.4, 0.2);
 
+// -------------------------------------------------------------------- packing
+
 impl SdfShape {
     /// Packs one shape the way SDF Modeler feeds its own shader.
     ///
@@ -241,7 +246,12 @@ impl SdfShape {
                 let bevelled = modifiers.bevel * flat;
                 (
                     GPU_BRUSH_CUBE,
-                    Vec4::new(size.x, size.y, size.z, wall_thickness(modifiers.thickness, flat)),
+                    Vec4::new(
+                        size.x,
+                        size.y,
+                        size.z,
+                        wall_thickness(modifiers.thickness, flat),
+                    ),
                     Vec4::new(
                         rounded.max(bevelled).min(flat),
                         rounded.min(size.y),
@@ -288,10 +298,6 @@ impl SdfShape {
 /// exactly meets itself reads as a surface everywhere inside, and physics and
 /// the normals need a real interior. It must not be confused with a wall of
 /// zero, which is a real setting meaning the thinnest possible shell.
-///
-/// Solid is its own case rather than the limit of a closing wall: a wall that
-/// exactly meets itself reads as a surface everywhere inside, and physics and
-/// the normals need a real interior.
 fn wall_thickness(thickness: f32, flat: f32) -> f32 {
     if thickness >= 1.0 {
         return flat;
@@ -301,9 +307,10 @@ fn wall_thickness(thickness: f32, flat: f32) -> f32 {
 
 /// Sharpen, as a superellipsoid exponent. 0 is a plain ellipsoid; turning it up
 /// squares the sphere off while keeping its curvature.
-// ponytail: the curve from the slider to the exponent is a guess with the right
-// endpoints. Compare a sharpened sphere against the editor before trusting the
-// middle of the range.
+///
+/// ponytail: the curve from the slider to the exponent is a guess with the
+/// right endpoints. Compare a sharpened sphere against the editor before
+/// trusting the middle of the range.
 fn sharpen_exponent(sharpen: f32) -> f32 {
     2.0 / (1.0 - sharpen.clamp(0.0, 0.95))
 }
@@ -413,14 +420,11 @@ pub(crate) fn sync_shapes_to_gpu(
     scene.grid = grid;
 }
 
-// The CPU half of the signed distance field. Every function below mirrors one
-// in assets/shaders/sdf.wgsl and must be changed together with it. They read
-// the same `GpuShape` values that were uploaded, so the only way they can
-// disagree is if the maths itself drifts.
-//
-// The primitives and blend operations are ports of SDF Modeler's own
-// shaders/sdf.glsl, so an imported scene evaluates to the same field the editor
-// drew. Where a name appears there, it is kept here.
+// The primitives and blend operations below are ports of SDF Modeler's own
+// shaders/sdf.glsl, so a scene authored against the editor evaluates to the
+// field it drew. Where a name appears there, it is kept here.
+
+// ------------------------------------------------------------------ the field
 
 /// Superellipsoid. `exponent` 2 is a plain ellipsoid; larger values square it
 /// off towards a bevelled box, which is the editor's Sharpen modifier. Scaling
@@ -455,8 +459,10 @@ fn ellipse_distance(point: Vec2, radii: Vec2) -> f32 {
         let a = (point - along).dot(across);
         let c = (point - along).dot(along) + across.dot(across);
         let b = (c * c - a * a).max(0.0).sqrt();
-        direction = Vec2::new(direction.x * b - direction.y * a, direction.y * b + direction.x * a)
-            / c.max(MIN_RADIUS);
+        direction = Vec2::new(
+            direction.x * b - direction.y * a,
+            direction.y * b + direction.x * a,
+        ) / c.max(MIN_RADIUS);
     }
 
     let distance = (point - radii * direction).length();
@@ -500,8 +506,7 @@ fn uberprim_distance(local_point: Vec3, s: Vec4, r: Vec3) -> f32 {
 
     let corner = local_point.abs() - s.truncate();
     let flat = Vec2::new(corner.x, corner.z);
-    let mut radial =
-        flat.max(Vec2::ZERO).length() + flat.max_element().min(0.0) - r.x;
+    let mut radial = flat.max(Vec2::ZERO).length() + flat.max_element().min(0.0) - r.x;
     radial = radial.abs() - s.w;
 
     let profile = Vec2::new(radial, local_point.y - s.y);
@@ -547,7 +552,12 @@ fn tapered_uberprim(local_point: Vec3, s: Vec4, r: Vec4) -> f32 {
     let inset = taper * height_fraction;
 
     let remaining = (flat - inset).max(0.0);
-    let narrowed = Vec4::new(s.x - inset, s.y, s.z - inset, bore(s.w, taper - inset, remaining));
+    let narrowed = Vec4::new(
+        s.x - inset,
+        s.y,
+        s.z - inset,
+        bore(s.w, taper - inset, remaining),
+    );
     let corner = Vec3::new((r.x - inset).max(0.0), r.y, 0.0);
 
     let slope = taper / (2.0 * s.y);
@@ -579,7 +589,7 @@ pub(crate) fn shape_distance(shape: &GpuShape, world_point: Vec3) -> f32 {
     }
 }
 
-// ---------------------------------------------------------- blend operations
+// ----------------------------------------------------------- blend operations
 
 /// Every operation takes the incoming shape first and the field built so far
 /// second, matching `blend_op_ex` in the editor's sdf.glsl.
@@ -598,10 +608,9 @@ fn intersect_smooth(shape: f32, field: f32, radius: f32) -> f32 {
     field.lerp(shape, mix) + radius * mix * (1.0 - mix)
 }
 
-/// Combines one shape with everything already in the field. `radius` is the
-/// smoothing width and `strength` the offset the offset-based modes work over.
-/// The three primitives, each picking its variant. Written the same way as
-/// `op_union` and friends in sdf.wgsl so the two evaluators read alike.
+/// The three booleans, each picking its variant: chamfered, smoothed, or plain.
+/// Written the same way as `op_union` and friends in sdf.wgsl so the two
+/// evaluators read alike.
 ///
 /// At radius zero the smooth ops divide by zero, so they fall back to the plain
 /// boolean they smooth - which is also what the editor draws.
@@ -635,7 +644,8 @@ fn op_subtract(shape: f32, field: f32, radius: f32, chamfer: bool) -> f32 {
     field.max(-shape)
 }
 
-/// Combines one shape with everything already in the field.
+/// Combines one shape with everything already in the field. `radius` is the
+/// smoothing width and `strength` the offset the offset-based modes work over.
 pub(crate) fn blend(shape: f32, field: f32, blend: &GpuBlend, chamfer: bool) -> f32 {
     let (radius, strength) = (blend.radius, blend.strength);
     match blend.mode {
@@ -661,6 +671,8 @@ pub(crate) fn blend(shape: f32, field: f32, blend: &GpuBlend, chamfer: bool) -> 
         _ => op_union(shape, field, radius, chamfer),
     }
 }
+
+// --------------------------------------------------------------- scene bounds
 
 /// Half the world-space size of a shape's axis-aligned bounding box, plus the
 /// slack a smooth blend can push the surface outwards by.
@@ -709,8 +721,7 @@ pub(crate) fn scene_bounds(shapes: &[GpuShape]) -> (Vec3, Vec3) {
     )
 }
 
-
-// ================================================================ the grid
+// ------------------------------------------------------------------- the grid
 
 /// Cells along each axis of the acceleration grid, and the ceiling the buffers
 /// are sized for. `bench --grid <n>` sweeps the live value.
@@ -721,7 +732,6 @@ const GRID_MAX_CELLS: usize =
 /// Words in the cell table: offset and count for every cell the buffer could
 /// ever hold.
 pub(crate) const GRID_CELL_WORDS: usize = GRID_MAX_CELLS * 2;
-/// Words in the membership list.
 pub(crate) const GRID_INDEX_WORDS: usize = GRID_MAX_ENTRIES;
 /// Ceiling on total cell memberships. A cell that would push past it is marked
 /// [`GRID_CELL_FULL`] instead, which is slower but never wrong.
@@ -811,13 +821,6 @@ impl SdfGrid {
         point.cmpge(self.origin).all() && point.cmple(high).all()
     }
 
-    /// Distance from a point to the wall of its own cell. Mirrors
-    /// `grid_exit_distance` in sdf.wgsl.
-    ///
-    /// This is the load-bearing part. A cell only knows its own shapes, so the
-    /// distance it reports may be far too large - the next cell could hold a
-    /// surface one step away. Clamping to the cell wall makes the answer
-    /// conservative again: nothing outside can be reached without crossing it.
     /// How far each cell reaches past its own walls. Cells overlap by this
     /// much, so the box a lookup measures against is bigger than the box that
     /// chose it.
@@ -838,6 +841,13 @@ impl SdfGrid {
         cell_size * 0.5
     }
 
+    /// Distance from a point to the wall of its own cell. Mirrors
+    /// `grid_exit_distance` in sdf.wgsl.
+    ///
+    /// This is the load-bearing part. A cell only knows its own shapes, so the
+    /// distance it reports may be far too large - the next cell could hold a
+    /// surface one step away. Clamping to the cell wall makes the answer
+    /// conservative again: nothing outside can be reached without crossing it.
     pub(crate) fn exit_distance(&self, point: Vec3) -> f32 {
         let slot = self.slot_of(point);
         let overlap = Self::overlap(self.cell_size);
@@ -899,7 +909,9 @@ pub(crate) fn build_grid(
     };
     let last = (resolution - UVec3::ONE).as_vec3();
     let slots = |corner: Vec3| -> [usize; 3] {
-        let slot = ((corner - bounds_min) / cell_size).floor().clamp(Vec3::ZERO, last);
+        let slot = ((corner - bounds_min) / cell_size)
+            .floor()
+            .clamp(Vec3::ZERO, last);
         [slot.x as usize, slot.y as usize, slot.z as usize]
     };
 
@@ -912,8 +924,8 @@ pub(crate) fn build_grid(
         for z in from[2]..=to[2] {
             for y in from[1]..=to[1] {
                 for x in from[0]..=to[0] {
-                    let cell = x + y * resolution.x as usize
-                        + z * (resolution.x * resolution.y) as usize;
+                    let cell =
+                        x + y * resolution.x as usize + z * (resolution.x * resolution.y) as usize;
                     counts[cell] += 1;
                     total += 1;
                 }
@@ -930,8 +942,6 @@ pub(crate) fn build_grid(
         return grid;
     }
 
-
-    // Prefix sum into the offsets.
     let mut offset = 0u32;
     for (cell, count) in counts.iter().enumerate() {
         grid.cells[cell * 2] = offset;
@@ -948,8 +958,8 @@ pub(crate) fn build_grid(
         for z in from[2]..=to[2] {
             for y in from[1]..=to[1] {
                 for x in from[0]..=to[0] {
-                    let cell = x + y * resolution.x as usize
-                        + z * (resolution.x * resolution.y) as usize;
+                    let cell =
+                        x + y * resolution.x as usize + z * (resolution.x * resolution.y) as usize;
                     let at = (grid.cells[cell * 2] + written[cell]) as usize;
                     grid.indices[at] = index as u32;
                     written[cell] += 1;
@@ -1008,6 +1018,91 @@ pub(crate) fn scene_distance_gridded(
     field.min(grid.exit_distance(world_point))
 }
 
+/// A lower bound on the field, built from the shapes' cull boxes and nothing
+/// else. Mirrors `shadow_proxy_distance` in sdf.wgsl.
+///
+/// The shadow march reads this instead of the field. A second call to
+/// `shape_distance` anywhere in the shader costs 13.9 ms on `spread:80` through
+/// register pressure alone - whether or not anything casts a shadow, and
+/// whether it marches 12 steps or 48. Measured 2026-09-01, table in
+/// memory/reference/lights.md.
+///
+/// Wrong in two visible ways, both of them shape rather than size. A cube with
+/// a heavy round or taper casts the shadow of the box it started as. And only
+/// ADD contributes, so a hole carved by SUBTRACT does not let light through.
+///
+/// ponytail: the hole needs the real field, which is the thing this avoids.
+/// One shape's contribution to [`shadow_proxy_distance`]: the cheapest shape
+/// that still *contains* the real one, in the real one's own frame. Mirrors
+/// `shadow_proxy_bound` in sdf.wgsl.
+///
+/// Containment is the whole argument. A shape that swallows another is never
+/// further from a point than the shape inside it, so this can only report a
+/// shorter distance than the field - which a march may act on, because acting
+/// early is stopping early.
+///
+/// Deliberately not [`GpuShape::cull_extent`]: that box carries the blend
+/// radius and is axis-aligned about `center`, which drew shadows several times
+/// the size of what cast them and slabs where a rotated plate stood.
+///
+/// Non-ADD modes sit this out. They read the field rather than adding to it, so
+/// nothing about their own extent bounds what they do to it.
+#[allow(dead_code)]
+pub(crate) fn shadow_proxy_bound(shape: &GpuShape, world_point: Vec3) -> f32 {
+    if shape.blend.mode != GPU_MODE_ADD {
+        return MAX_MARCH_DISTANCE;
+    }
+    let local = Quat::from_vec4(shape.inverse_rotation) * (world_point - shape.center);
+    let half = shape.s.truncate();
+
+    match shape.brush {
+        // The field's own estimate. It is already compiled in for the camera
+        // march and costs three `powf`, nothing like the uberprim.
+        GPU_BRUSH_SPHERE => ellipsoid_distance(local, half, shape.s.w),
+        // A round cross-section at the wider radius, which contains the ellipse
+        // the shape actually has - and is exact for a round cylinder, which is
+        // most of them. `ellipse_distance` is five Newton steps and is the one
+        // thing in the field more expensive than the uberprim.
+        GPU_BRUSH_CYLINDER => {
+            let radial = local.xz().length() - half.x.max(half.z);
+            let edge = Vec2::new(radial, local.y.abs() - half.y);
+            edge.max_element().min(0.0) + edge.max(Vec2::ZERO).length()
+        }
+        // Every cube modifier only ever removes material - round and bevel cut
+        // the edges, cone narrows the top, thickness hollows an interior
+        // nothing sees from outside. So the plain box contains all of them, and
+        // is exact for a cube nobody has touched.
+        _ => cull_box_distance(local, half),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn shadow_proxy_distance(shapes: &[GpuShape], grid: &SdfGrid, world_point: Vec3) -> f32 {
+    let bound = |shape: &GpuShape| shadow_proxy_bound(shape, world_point);
+    let everything = || shapes.iter().map(bound).fold(MAX_MARCH_DISTANCE, f32::min);
+
+    if grid.cells.len() < grid.cell_count() * 2 || shapes.is_empty() || !grid.holds(world_point) {
+        return everything();
+    }
+    let cell = grid.cell_of(world_point);
+    let count = grid.cells[cell * 2 + 1];
+    if count == GRID_CELL_FULL {
+        return everything();
+    }
+
+    let offset = grid.cells[cell * 2] as usize;
+    let field = (0..count as usize)
+        .map(|slot| bound(&shapes[grid.indices[offset + slot] as usize]))
+        .fold(MAX_MARCH_DISTANCE, f32::min);
+
+    if count as usize == shapes.len() {
+        return field;
+    }
+    field.min(grid.exit_distance(world_point))
+}
+
+// ------------------------------------------------------------------ the scene
+
 /// The four corners of a tetrahedron. Sampling the field at each and weighting
 /// by its direction gives the gradient in 4 taps instead of 6.
 const TETRAHEDRON_CORNERS: [Vec3; 4] = [
@@ -1046,6 +1141,8 @@ pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
     }
     field
 }
+
+// -------------------------------------------------------------------- culling
 
 /// Distance to a shape's cull box. Zero inside it, where no useful bound
 /// exists.

@@ -4,13 +4,16 @@
 use bevy::{
     prelude::*,
     reflect::TypePath,
-    render::{render_resource::{AsBindGroup, ShaderType}, storage::ShaderBuffer},
+    render::{
+        render_resource::{AsBindGroup, ShaderType},
+        storage::ShaderBuffer,
+    },
     shader::ShaderRef,
 };
 
-use crate::input::Action;
-use crate::field::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GpuShape, MAX_SHAPES};
-use crate::light::{GpuLight, MAX_LIGHTS};
+use crate::game::input::Action;
+use crate::sdf::field::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GpuShape, MAX_SHAPES};
+use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 
 pub(crate) struct RenderPlugin;
 
@@ -141,8 +144,9 @@ fn spawn_camera(
     ));
 }
 
-/// `Action::ToggleDebugView`: swap between the shaded image and a heatmap of marching steps, so the
-/// pixels that actually cost something are visible instead of guessed at.
+/// `Action::ToggleDebugView`: swap between the shaded image and a heatmap of
+/// marching steps, so the pixels that actually cost something are visible
+/// instead of guessed at.
 fn toggle_debug_view(
     actions: Res<ButtonInput<Action>>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
@@ -156,8 +160,8 @@ fn toggle_debug_view(
     }
 }
 
-/// `Action::ToggleQuad`: hide the quad entirely. What is left is Bevy's own per-frame cost -
-/// the floor every render measurement sits on top of.
+/// `Action::ToggleQuad`: hide the quad entirely. What is left is Bevy's own
+/// per-frame cost - the floor every render measurement sits on top of.
 fn toggle_quad(actions: Res<ButtonInput<Action>>, visibility: Single<&mut Visibility, With<Quad>>) {
     if !actions.just_pressed(Action::ToggleQuad) {
         return;
@@ -169,8 +173,8 @@ fn toggle_quad(actions: Res<ButtonInput<Action>>, visibility: Single<&mut Visibi
     };
 }
 
-/// Rebuild the quad so it exactly covers the frustum, with square cells.
-/// Only runs when the aspect ratio actually changed.
+/// Rebuild the quad so it exactly covers the frustum. Only runs when the
+/// aspect ratio actually changed.
 fn fit_quad(
     proj: Single<&Projection, With<Camera3d>>,
     quad: Single<(&mut Mesh3d, &MeshMaterial3d<SdfMaterial>), With<Quad>>,
