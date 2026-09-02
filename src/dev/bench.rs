@@ -44,8 +44,9 @@ use bevy::{
     window::{PresentMode, WindowResolution},
 };
 
+use crate::args;
 use crate::game::world::SdfWorld;
-use crate::sdf::field::{Albedo, SdfShape};
+use crate::sdf::field::{Albedo, GridSettings, SdfShape};
 use crate::sdf::light::{Light, LightKind};
 use crate::sdf::render::{Quad, SdfMaterial};
 
@@ -79,30 +80,18 @@ const SPREAD_BOX: Vec3 = Vec3::splat(0.8);
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct Bench {
     pub(crate) scene: BenchScene,
-    /// The per-shape box reject, on unless `--no-cull`. The A/B this exists for
-    /// only means anything on a `spread:` scene.
-    pub(crate) cull: bool,
-    /// March over-relaxation. `--omega 1.0` is plain sphere tracing, which is
-    /// the baseline every other value is measured against.
-    pub(crate) omega: f32,
     /// Measurement blocks to run before exiting. Repeats inside one process
     /// share a window, a driver state and a thermal state, so the spread
     /// between them is the honest error bar on a single number - and until
     /// 2026-08-31 there was none, which left a 6% result unreadable next to
     /// 18% of drift between sessions.
     pub(crate) repeat: usize,
-    /// Cells per axis of the acceleration grid. Fine culls better and makes
-    /// empty space cost more steps, so the useful value is measured, not
-    /// reasoned about.
-    pub(crate) grid: u32,
-    pub(crate) use_grid: bool,
     /// Point lights ringing the scene. Diffuse is nearly free; the price of a
     /// light is whether it casts.
     pub(crate) lights: usize,
     /// How many of them cast. **One march per shaded pixel each**, so this is
     /// the number that moves the frame time.
     pub(crate) shadows: usize,
-    pub(crate) shadow_steps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,17 +106,20 @@ pub(crate) enum BenchScene {
     Spread(usize),
 }
 
-/// Reads the command line. `None` means an ordinary run of the game.
+/// Reads the command line. `None` means this is not a bench run.
 ///
-/// ponytail: hand-parsed, three arguments. A `clap` dependency to read
-/// `bench grid:20` would be larger than the thing it parses.
+/// Only the flags a bench run itself acts on are here. `--omega`, `--grid`,
+/// `--no-grid` and `--no-cull` are read by the modules that own them, on every
+/// kind of run - see [`crate::args`].
+///
+/// ponytail: hand-parsed. A `clap` dependency to read `bench grid:20` would be
+/// larger than the thing it parses.
 pub(crate) fn requested() -> Option<Bench> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.first().map(String::as_str) != Some("bench") {
+    if args::positional(0).as_deref() != Some("bench") {
         return None;
     }
     let count_after = |prefix: &str, text: &str| text.strip_prefix(prefix)?.parse().ok();
-    let scene = match arguments.get(1).map(String::as_str) {
+    let scene = match args::positional(1).as_deref() {
         Some("empty") | None => BenchScene::Empty,
         Some(other) => {
             if let Some(count) = count_after("grid:", other) {
@@ -142,23 +134,11 @@ pub(crate) fn requested() -> Option<Bench> {
             }
         }
     };
-    let flag = |name: &str| arguments.iter().any(|argument| argument == name);
-    let value_after = |name: &str| {
-        let at = arguments.iter().position(|argument| argument == name)?;
-        arguments.get(at + 1)?.parse::<f32>().ok()
-    };
     Some(Bench {
         scene,
-        cull: !flag("--no-cull"),
-        omega: value_after("--omega").unwrap_or(crate::sdf::render::OMEGA),
-        repeat: value_after("--repeat").map_or(1, |count| (count as usize).max(1)),
-        grid: value_after("--grid")
-            .map_or(crate::sdf::field::GRID_DEFAULT_RESOLUTION, |n| n as u32),
-        use_grid: !flag("--no-grid"),
-        lights: value_after("--lights").map_or(1, |count| count as usize),
-        shadows: value_after("--shadows").map_or(0, |count| count as usize),
-        shadow_steps: value_after("--shadow-steps")
-            .map_or(crate::sdf::render::SHADOW_STEPS, |count| count as u32),
+        repeat: args::value("--repeat").map_or(1, |count| (count as usize).max(1)),
+        lights: args::value("--lights").map_or(1, |count| count as usize),
+        shadows: args::value("--shadows").map_or(0, |count| count as usize),
     })
 }
 
@@ -173,7 +153,6 @@ impl Plugin for BenchPlugin {
             // PostStartup: the camera and the quad are spawned in Startup, and
             // two systems in one schedule have no order between them.
             .add_systems(Startup, (spawn_bench_scene, spawn_bench_lights))
-            .add_systems(PostStartup, apply_switches)
             // PostUpdate, every frame: `fly_camera` is still running, and all
             // 600 recorded frames have to be shot from the same place.
             .add_systems(PostUpdate, park_camera)
@@ -317,25 +296,6 @@ fn park_camera(camera: Single<&mut Transform, With<Camera3d>>) {
     *camera.into_inner() = Transform::from_translation(BENCH_EYE).looking_at(Vec3::ZERO, Vec3::Y);
 }
 
-fn apply_switches(
-    bench: Res<Bench>,
-    mut grid: ResMut<crate::sdf::field::GridSettings>,
-    quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
-    mut materials: ResMut<Assets<SdfMaterial>>,
-) {
-    if let Some(mut material) = materials.get_mut(&quad.0) {
-        material.render_params.cull = u32::from(bench.cull);
-        material.render_params.omega = bench.omega;
-        material.render_params.shadow_steps = bench.shadow_steps;
-    }
-    // The grid is rebuilt from these, so they go to the settings rather than
-    // straight into the uniform.
-    *grid = crate::sdf::field::GridSettings {
-        resolution: bench.grid,
-        enabled: bench.use_grid,
-    };
-}
-
 // ------------------------------------------------------------------ measuring
 
 #[derive(Resource, Default)]
@@ -349,11 +309,15 @@ struct Frames {
 /// `Time::delta` is the whole frame, which is what a player feels. It is not a
 /// GPU timing - a timestamp query would separate the march from everything
 /// else, and is the next rung if the march ever stops being the obvious cost.
+#[allow(clippy::too_many_arguments)] // a system, and half of them are readback
 fn record(
     mut frames: ResMut<Frames>,
     time: Res<Time>,
     bench: Res<Bench>,
     shapes: Query<(), With<SdfShape>>,
+    grid: Res<GridSettings>,
+    quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
+    materials: Res<Assets<SdfMaterial>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     frames.times.push(time.delta_secs() * 1000.0);
@@ -362,6 +326,15 @@ fn record(
     if frames.times.len() < block {
         return;
     }
+
+    // Read back from the material and the grid settings rather than from the
+    // flags. The modules that own these knobs are what applied them, and a
+    // measurement harness that reports what it *asked* for rather than what it
+    // got has one more way to lie.
+    let params = materials
+        .get(&quad.0)
+        .map(|material| material.render_params.clone())
+        .unwrap_or_default();
 
     let mut recorded: Vec<f32> = frames.times.split_off(block - RECORDED_FRAMES);
     recorded.sort_by(f32::total_cmp);
@@ -383,16 +356,16 @@ fn record(
         "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tlights\t{}\tshadows\t{}\tsteps\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
         frames.done + 1,
         shapes.iter().count(),
-        if bench.cull { "on" } else { "off" },
-        bench.omega,
-        if bench.use_grid {
-            bench.grid.to_string()
+        if params.cull == 1 { "on" } else { "off" },
+        params.omega,
+        if grid.enabled {
+            grid.resolution.to_string()
         } else {
             "off".to_string()
         },
         bench.lights,
         bench.shadows,
-        bench.shadow_steps,
+        params.shadow_steps,
         at(0.0),
         median,
         at(0.95),

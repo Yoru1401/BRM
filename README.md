@@ -51,6 +51,27 @@ count scenes tile the same volume, so only the shape count changes - not the
 screen coverage. Use `--repeat 4` and read run 3 or later: the first block is
 still warming up, and can catch the shader before it has loaded.
 
+## Flags
+
+Every knob that used to need a recompile takes a flag, on any run — ordinary,
+`bench` or `shot`. The module that owns a value reads its own flag; the default
+stays a `const` beside it.
+
+| flag | default | what |
+|---|---|---|
+| `--omega <n>` | 1.2 | march over-relaxation; 1.0 is plain sphere tracing |
+| `--grid <n>` / `--no-grid` | 16 | acceleration grid cells along the longest axis |
+| `--no-cull` | on | the per-shape box reject |
+| `--shadow-steps <n>` | 48 | steps a shadow ray may take |
+| `--speed <n>` | 5.0 | fly camera |
+| `--sensitivity <n>` | 0.003 | mouse look |
+| `--gravity <n>` | 9.81 | downward pull |
+| `--friction <n>` | 0.6 | Coulomb limit at a contact |
+
+```sh
+cargo run --release -- --speed 12 --gravity 3
+```
+
 ## Screenshot
 
 ```sh

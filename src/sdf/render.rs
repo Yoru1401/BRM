@@ -11,6 +11,7 @@ use bevy::{
     shader::ShaderRef,
 };
 
+use crate::args;
 use crate::game::input::Action;
 use crate::sdf::field::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GpuShape, MAX_SHAPES};
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
@@ -29,10 +30,10 @@ const SHADER_PATH: &str = "shaders/sdf.wgsl";
 const QUAD_DIST: f32 = 1.0; // quad sits this far in front of the camera
 const QUAD_OVERSCAN: f32 = 1.01; // hair of slack so no gap at screen edge
 /// Over-relaxation factor. 1.0 is plain sphere tracing. Keinert et al. report
-/// 1.2 as a good default; `bench --omega <n>` is how it gets checked here.
+/// 1.2 as a good default; `--omega <n>` is how it gets checked here.
 pub(crate) const OMEGA: f32 = 1.2;
 /// Steps a shadow ray may take. A shadow that gives up reads as lit, which is
-/// the forgiving direction.
+/// the forgiving direction. `--shadow-steps <n>`.
 pub(crate) const SHADOW_STEPS: u32 = 48;
 
 /// The screen-filling quad. Rebuilt whenever the aspect ratio changes.
@@ -128,9 +129,12 @@ fn spawn_camera(
             Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(1.0)))), // resized by fit_quad
             MeshMaterial3d(materials.add(SdfMaterial {
                 render_params: RenderParams {
-                    cull: 1,
-                    omega: OMEGA,
-                    shadow_steps: SHADOW_STEPS,
+                    cull: u32::from(!args::flag("--no-cull")),
+                    omega: args::value("--omega").unwrap_or(OMEGA),
+                    shadow_steps:
+                        args::value("--shadow-steps").map_or(SHADOW_STEPS, |steps| steps as u32),
+                    // The grid is switched through `GridSettings`, which owns
+                    // it; this only mirrors that into the uniform.
                     grid: 1,
                     ..default()
                 },

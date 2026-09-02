@@ -16,6 +16,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use std::path::PathBuf;
 
+use crate::args;
+
 /// Frames to run before capturing. The shader and the storage buffers are
 /// assets: until they land the quad draws an empty field, which is a perfectly
 /// plausible-looking picture of nothing.
@@ -28,12 +30,11 @@ const DRAIN_FRAMES: usize = 60;
 
 /// Reads the command line. `None` means this is not a shot run.
 pub(crate) fn requested() -> Option<PathBuf> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.first().map(String::as_str) != Some("shot") {
+    if args::positional(0).as_deref() != Some("shot") {
         return None;
     }
     Some(PathBuf::from(
-        arguments.get(1).map_or("shot.png", String::as_str),
+        args::positional(1).unwrap_or_else(|| "shot.png".into()),
     ))
 }
 

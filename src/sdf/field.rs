@@ -13,6 +13,7 @@ use bevy::{
     render::{render_resource::ShaderType, storage::ShaderBuffer},
 };
 
+use crate::args;
 use crate::game::world::SdfWorld;
 use crate::sdf::render::{Quad, SdfMaterial};
 
@@ -740,6 +741,10 @@ const GRID_MAX_ENTRIES: usize = 1 << 18;
 pub(crate) const GRID_CELL_FULL: u32 = u32::MAX;
 
 /// How the grid is built and whether it is used at all.
+///
+/// `--grid <n>` and `--no-grid` on any run. Finer culls better and makes empty
+/// space cost more steps, so the useful value is measured rather than reasoned
+/// about - which is the reason it is a knob and not a constant.
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct GridSettings {
     pub(crate) resolution: u32,
@@ -749,8 +754,8 @@ pub(crate) struct GridSettings {
 impl Default for GridSettings {
     fn default() -> Self {
         GridSettings {
-            resolution: GRID_DEFAULT_RESOLUTION,
-            enabled: true,
+            resolution: args::value("--grid").map_or(GRID_DEFAULT_RESOLUTION, |cells| cells as u32),
+            enabled: !args::flag("--no-grid"),
         }
     }
 }

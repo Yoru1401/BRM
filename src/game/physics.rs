@@ -5,20 +5,40 @@
 
 use bevy::prelude::*;
 
+use crate::args;
 use crate::sdf::field::{Albedo, SdfScene, SdfShape, SphereBody, scene_distance, scene_normal};
 
 pub(crate) struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            FixedUpdate,
-            (simulate_bodies, resolve_body_pairs, despawn_fallen_bodies)
-                .chain()
-                .run_if(static_field_is_ready),
-        )
-        .add_systems(Update, draw_body_spin)
-        .add_systems(Startup, spawn_bodies);
+        app.init_resource::<Tuning>()
+            .add_systems(
+                FixedUpdate,
+                (simulate_bodies, resolve_body_pairs, despawn_fallen_bodies)
+                    .chain()
+                    .run_if(static_field_is_ready),
+            )
+            .add_systems(Update, draw_body_spin)
+            .add_systems(Startup, spawn_bodies);
+    }
+}
+
+/// What a body falls through. `--gravity <n>` scales the pull; `--friction <n>`
+/// the grip. Both are feel rather than fact, and feel is answered by playing
+/// with a value, not by picking one.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct Tuning {
+    pub(crate) gravity: Vec3,
+    pub(crate) friction: f32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning {
+            gravity: args::value("--gravity").map_or(GRAVITY, |pull| Vec3::new(0.0, -pull, 0.0)),
+            friction: args::value("--friction").unwrap_or(FRICTION_COEFFICIENT),
+        }
     }
 }
 
@@ -74,6 +94,7 @@ fn simulate_bodies(
     mut bodies: Query<(&mut SphereBody, &mut Transform)>,
     scene: Res<SdfScene>,
     time: Res<Time<Fixed>>,
+    tuning: Res<Tuning>,
 ) {
     let step = time.delta_secs();
     let statics = scene.static_shapes();
@@ -87,7 +108,7 @@ fn simulate_bodies(
             body.resting = false;
         }
 
-        body.velocity += GRAVITY * step;
+        body.velocity += tuning.gravity * step;
         placement.translation += body.velocity * step;
         if body.angular_velocity != Vec3::ZERO {
             body.orientation = (Quat::from_scaled_axis(body.angular_velocity * step)
@@ -114,6 +135,7 @@ fn simulate_bodies(
             body.angular_velocity,
             body.radius,
             normal_impulse,
+            tuning.friction,
         );
         body.velocity += velocity_change;
         body.angular_velocity += spin_change;
@@ -141,6 +163,7 @@ pub(crate) fn contact_friction(
     angular_velocity: Vec3,
     radius: f32,
     normal_impulse: f32,
+    coefficient: f32,
 ) -> (Vec3, Vec3) {
     let arm = -normal * radius;
     let contact_velocity = velocity + angular_velocity.cross(arm);
@@ -150,7 +173,7 @@ pub(crate) fn contact_friction(
     };
 
     let to_stop_slipping = CONTACT_TANGENT_FACTOR * slip.length();
-    let magnitude = to_stop_slipping.min(FRICTION_COEFFICIENT * normal_impulse);
+    let magnitude = to_stop_slipping.min(coefficient * normal_impulse);
     let impulse = -slip_direction * magnitude;
 
     let inertia = SPHERE_INERTIA_FACTOR * radius * radius;

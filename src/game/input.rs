@@ -13,14 +13,34 @@ use bevy::{
     prelude::*,
 };
 
+use crate::args;
+
 pub(crate) struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Bindings>()
+            .init_resource::<Fly>()
             .init_resource::<ButtonInput<Action>>()
             .add_systems(PreUpdate, read_bindings.after(InputSystems))
             .add_systems(Update, fly_camera);
+    }
+}
+
+/// How the camera flies. `--speed <n>` and `--sensitivity <n>`, because the
+/// only way to know whether a camera feels right is to fly it.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct Fly {
+    pub(crate) speed: f32,
+    pub(crate) sensitivity: f32,
+}
+
+impl Default for Fly {
+    fn default() -> Self {
+        Fly {
+            speed: args::value("--speed").unwrap_or(MOVE_SPEED),
+            sensitivity: args::value("--sensitivity").unwrap_or(SENSITIVITY),
+        }
     }
 }
 
@@ -105,6 +125,7 @@ fn fly_camera(
     actions: Res<ButtonInput<Action>>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
+    fly: Res<Fly>,
 ) {
     let mut camera = camera.into_inner();
 
@@ -112,8 +133,8 @@ fn fly_camera(
         let (yaw, pitch, _) = camera.rotation.to_euler(EulerRot::YXZ);
         camera.rotation = Quat::from_euler(
             EulerRot::YXZ,
-            yaw - motion.delta.x * SENSITIVITY,
-            (pitch - motion.delta.y * SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT),
+            yaw - motion.delta.x * fly.sensitivity,
+            (pitch - motion.delta.y * fly.sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT),
             0.0,
         );
     }
@@ -138,6 +159,6 @@ fn fly_camera(
         direction.y -= 1.0;
     }
     if direction != Vec3::ZERO {
-        camera.translation += direction.normalize() * MOVE_SPEED * time.delta_secs();
+        camera.translation += direction.normalize() * fly.speed * time.delta_secs();
     }
 }

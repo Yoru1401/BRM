@@ -485,8 +485,14 @@ mod sdf_tests {
     #[test]
     fn sliding_turns_into_spin() {
         // Sliding along +X on a floor whose normal is +Y, no spin yet.
-        let (velocity_change, spin_change) =
-            contact_friction(Vec3::Y, Vec3::X, Vec3::ZERO, 0.5, 10.0);
+        let (velocity_change, spin_change) = contact_friction(
+            Vec3::Y,
+            Vec3::X,
+            Vec3::ZERO,
+            0.5,
+            10.0,
+            FRICTION_COEFFICIENT,
+        );
         // Friction opposes the slide...
         assert!(velocity_change.x < 0.0);
         // ...and torques the ball forward, which is -Z for +X travel on +Y up.
@@ -500,7 +506,7 @@ mod sdf_tests {
         let velocity = Vec3::X;
         let spin = Vec3::new(0.0, 0.0, -velocity.x / radius);
         let (velocity_change, spin_change) =
-            contact_friction(Vec3::Y, velocity, spin, radius, 10.0);
+            contact_friction(Vec3::Y, velocity, spin, radius, 10.0, FRICTION_COEFFICIENT);
         assert!(velocity_change.length() < 1e-5);
         assert!(spin_change.length() < 1e-5);
     }
@@ -508,7 +514,14 @@ mod sdf_tests {
     #[test]
     fn coulomb_caps_friction_on_a_weak_contact() {
         // Barely resting on the surface, so friction cannot kill a fast slide.
-        let (gentle, _) = contact_friction(Vec3::Y, Vec3::X * 10.0, Vec3::ZERO, 0.5, 0.01);
+        let (gentle, _) = contact_friction(
+            Vec3::Y,
+            Vec3::X * 10.0,
+            Vec3::ZERO,
+            0.5,
+            0.01,
+            FRICTION_COEFFICIENT,
+        );
         assert!((gentle.length() - FRICTION_COEFFICIENT * 0.01).abs() < 1e-6);
     }
 
@@ -620,6 +633,32 @@ mod sdf_tests {
         // A point in the remaining shell is still inside.
         assert!(scene_distance(&scene, Vec3::new(1.5, 0.0, 0.0)) < 0.0);
     }
+    // ----------------------------------------------------------- the arguments
+
+    /// A flag reader is trivial until it is wrong, and then every tuned value
+    /// silently reads its default. Each case here is one way that happens.
+    #[test]
+    fn a_flag_reads_the_number_after_it_and_nothing_else() {
+        use crate::args::value_in;
+
+        let line: Vec<String> = ["idk", "bench", "spread:80", "--omega", "1.0", "--no-grid"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+
+        assert_eq!(value_in(&line, "--omega"), Some(1.0));
+        // Absent is not zero. `unwrap_or(DEFAULT)` at every call site depends on
+        // this, and a zero omega would be a march that never advances.
+        assert_eq!(value_in(&line, "--grid"), None);
+        // Present but followed by another flag, not a number.
+        assert_eq!(value_in(&line, "--no-grid"), None);
+        // Present as the last word, with nothing after it at all.
+        let trailing = vec!["idk".to_string(), "--speed".to_string()];
+        assert_eq!(value_in(&trailing, "--speed"), None);
+        // A prefix of a real flag is not that flag.
+        assert_eq!(value_in(&line, "--omeg"), None);
+    }
+
     // ------------------------------------------------------------------ input
 
     /// A binding has to survive the whole press-hold-release cycle: the frame

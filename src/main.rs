@@ -30,6 +30,9 @@
 //! A `bench` run adds `sdf/` and nothing from `game/`, which is what makes a
 //! frame time attributable to the renderer.
 //!
+//! `args` sits outside all three. It is the command line, and every module that
+//! owns a tunable reads its own flag from it - see [`args`] for the list.
+//!
 //! # One field, two evaluators
 //!
 //! `scene_distance` exists twice: once in `assets/shaders/sdf.wgsl` for
@@ -49,6 +52,7 @@
 //! | `V` | hide the quad, revealing Bevy's own per-frame cost |
 //! | `H` | shaded / march-step heatmap |
 
+mod args;
 mod dev;
 mod game;
 mod sdf;
