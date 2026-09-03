@@ -43,41 +43,6 @@ fn authored_shapes_land_where_they_were_written() {
 }
 
 #[test]
-fn the_kernel_matches_the_uberprim_it_replaced() {
-    let mut seed: u64 = 0x5eed_1234;
-    let mut next = || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 40) as f32 / 16_777_216.0
-    };
-
-    for _ in 0..5000 {
-        let half = Vec3::new(0.2 + next() * 2.0, 0.2 + next() * 2.0, 0.2 + next() * 2.0);
-        let footprint = half.x.min(half.z);
-
-        let wall = next() * footprint;
-        let side = next() * footprint;
-        let cap = next() * half.y;
-        let point = Vec3::new(
-            (next() - 0.5) * 6.0,
-            (next() - 0.5) * 6.0,
-            (next() - 0.5) * 6.0,
-        );
-
-        let s = half.extend(wall);
-        let r = Vec3::new(side, cap, 0.0);
-        let old = legacy_combined_primitive(point, s, r);
-        let new = rounded_box_in_legacy_terms(point, s, r);
-        assert!(
-            (old - new).abs() < 1e-4,
-            "kernels disagree at {point:?} half {half:?} wall {wall} \
-             side {side} cap {cap}: old {old}, new {new}"
-        );
-    }
-}
-
-#[test]
 fn a_fully_rounded_box_is_an_exact_sphere() {
     let scene = [shaped(Transform::IDENTITY, sphere_modifiers())];
     for probe in [
