@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 
-use crate::sdf::field::{Albedo, CsgOperation, GPU_MODE_SUBTRACT, Modifiers, SdfShape};
+use crate::sdf::field::{Albedo, Brush, CsgOperation, GPU_MODE_SUBTRACT, Modifiers};
 use crate::sdf::light::{Light, LightKind};
 
 pub(crate) struct WorldPlugin;
@@ -86,56 +86,61 @@ pub(crate) fn world_scene() -> impl Scene {
             // Floor first: it seeds the field, and it is what the bodies land
             // on. Without something under them they fall forever, and because
             // bodies are shapes the culling box follows them down.
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(0.0, -0.5, 0.0)}, scale: {Vec3::new(12.0, 0.5, 12.0)} }
              Albedo({stone})),
 
             // Two walls, softly welded to the floor.
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(0.0, 1.0, -6.0)}, scale: {Vec3::new(12.0, 1.5, 0.5)} }
              CsgOperation { radius: 0.4 }
              Albedo({stone})),
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(-6.0, 1.0, 0.0)}, scale: {Vec3::new(0.5, 1.5, 12.0)} }
              CsgOperation { radius: 0.4 }
              Albedo({stone})),
 
             // A rounded pillar.
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(-3.0, 1.2, -3.0)}, scale: {Vec3::new(0.8, 1.2, 0.8)} }
              Modifiers { round: 0.35 }
              Albedo({clay})),
 
             // A tube: hollow, open at both ends.
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(0.0, 1.0, -3.0)}, scale: {Vec3::new(1.0, 1.0, 1.0)} }
              Modifiers { bevel: 1.0, thickness: 0.4 }
              Albedo({clay})),
 
             // A funnel: tapered and hollow, so the bore is a slit at the top
             // and the base is solid.
-            (template_value(SdfShape::Cube)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(3.0, 1.0, -3.0)}, scale: {Vec3::new(1.2, 1.0, 1.2)} }
              Modifiers { cone: 0.6, thickness: 0.3 }
              Albedo({clay})),
 
-            // A sphere welded into a slab with a wide blend.
-            (template_value(SdfShape::Cube)
+            // A dome welded into a slab with a wide blend. Full round on a
+            // uniform box is exactly a sphere.
+            (template_value(Brush)
              Transform { translation: {Vec3::new(3.0, 0.4, 2.0)}, scale: {Vec3::new(1.6, 0.4, 1.0)} }
              Albedo({moss})),
-            (template_value(SdfShape::Sphere)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(3.0, 0.9, 2.0)}, scale: {Vec3::splat(0.7)} }
+             Modifiers { round: 1.0 }
              CsgOperation { radius: 0.5 }
              Albedo({moss})),
 
-            // A cylinder, then a sphere subtracted out of it. The subtract has
-            // to come after its target to have anything to carve.
-            (template_value(SdfShape::Cylinder)
+            // A cylinder with a rounded rim - full bevel for the round
+            // cross-section, a little round for the rim - then a sphere
+            // subtracted out of it. The subtract has to come after its target
+            // to have anything to carve.
+            (template_value(Brush)
              Transform { translation: {Vec3::new(-3.0, 0.8, 2.0)}, scale: {Vec3::new(0.9, 0.8, 0.9)} }
-             Modifiers { round: 0.2 }
+             Modifiers { bevel: 1.0, round: 0.2 }
              Albedo({moss})),
-            (template_value(SdfShape::Sphere)
+            (template_value(Brush)
              Transform { translation: {Vec3::new(-3.0, 1.5, 2.0)}, scale: {Vec3::splat(0.6)} }
+             Modifiers { round: 1.0 }
              CsgOperation { mode: {GPU_MODE_SUBTRACT}, radius: 0.15 }
              Albedo({moss})),
         ]

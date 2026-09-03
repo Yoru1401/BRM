@@ -36,28 +36,25 @@ struct RenderParams {
     shadow_padding_three: u32,
 };
 
-/// One primitive, packed by `GpuShape::to_gpu` on the Rust side. Byte layout
-/// must match `struct GpuShape` in src/sdf/field.rs exactly.
+/// One brush, packed by `pack_brush` on the Rust side. Field order and byte
+/// layout must match `struct GpuShape` in src/sdf/field.rs exactly.
 struct Shape {
     center: vec3<f32>,
-    brush: u32,
-    // xyz are world-space half sizes with scale baked in. w depends on the
-    // brush: wall thickness for a cube, superellipsoid exponent for a sphere,
-    // rim radius for a cylinder.
-    s: vec4<f32>,
-    // Cube only. The uber primitive's radii: x rounds the vertical edges, y the
-    // horizontal ones, z is the taper.
-    r: vec4<f32>,
+    wall_thickness: f32, // half the wall of a hollow shape, footprint if solid
+    half_size: vec3<f32>, // world-space, scale baked in
+    side_radius: f32, // rounds the four vertical edges
     inverse_rotation: vec4<f32>, // quaternion, xyzw
     albedo: vec3<f32>, // linear RGB
-    chamfer: u32,
-    // Half the axis-aligned box used to reject this shape cheaply. Not the
-    // shape's own bounding box: it is inflated so that cull_scale times the
-    // distance to it is a true lower bound on what shape_distance returns.
+    cap_radius: f32, // rounds the top and bottom rim
+    // Half the axis-aligned box used to reject this brush cheaply. Not its
+    // bounding box: it is inflated so that cull_scale times the distance to it
+    // is a true lower bound on what shape_distance returns.
     cull_extent: vec3<f32>,
-    // How much the evaluator can undershoot the real distance. 1.0 where the
-    // primitive is exact, below it where the estimate is conservative.
-    cull_scale: f32,
+    cull_scale: f32, // how much the estimate may undershoot; 1.0 when exact
+    taper: f32, // fraction of the footprint the top loses
+    padding_one: f32,
+    padding_two: f32,
+    padding_three: f32,
     blend: Blend,
 };
 
@@ -77,16 +74,12 @@ struct GpuLight {
 
 struct Blend {
     mode: u32,
-    radius: f32,   // k in SDF Modeler's shaders
-    strength: f32, // r in SDF Modeler's shaders
-    padding: f32,
+    radius: f32, // width of the smooth or chamfered seam
+    strength: f32, // how far the offset-based modes push the field
+    chamfer: u32, // squares the seam off instead of rounding it
 };
 
-const BRUSH_SPHERE: u32 = 0u;
-const BRUSH_CUBE: u32 = 1u;
-const BRUSH_CYLINDER: u32 = 2u;
-
-// Blend modes, values as SDF Modeler's common.glsl defines them.
+// Blend modes, mirrored by the `GPU_MODE_` constants in field.rs.
 const MODE_ADD: u32 = 0u;
 const MODE_SUBTRACT: u32 = 1u;
 const MODE_INTERSECT: u32 = 2u;
@@ -134,154 +127,106 @@ fn rotate_by_quaternion(offset: vec3<f32>, rotation: vec4<f32>) -> vec3<f32> {
     return offset + 2.0 * cross(rotation.xyz, cross(rotation.xyz, offset) + rotation.w * offset);
 }
 
-/// Superellipsoid. `exponent` 2 is a plain ellipsoid; larger values square it
-/// off towards a bevelled box, which is the editor's Sharpen modifier. Scaling
-/// by the smallest radius is what keeps it from overshooting.
-fn ellipsoid_distance(local_position: vec3<f32>, unclamped_radii: vec3<f32>, exponent: f32) -> f32 {
-    let radii = max(unclamped_radii, vec3<f32>(MIN_RADIUS));
-    let scaled = pow(abs(local_position / radii), vec3<f32>(exponent));
-    return (pow(scaled.x + scaled.y + scaled.z, 1.0 / exponent) - 1.0)
-        * min(radii.x, min(radii.y, radii.z));
+/// The narrower of the two horizontal half extents. Round, bevel and taper are
+/// all measured against it. Mirrors `footprint_of` in field.rs.
+fn footprint_of(half_size: vec3<f32>) -> f32 {
+    return min(half_size.x, half_size.z);
 }
 
-/// Exact distance to an ellipse, by five Newton steps around the boundary.
-/// Exact matters here because it is the cylinder's whole cross-section.
-fn ellipse_distance(unsigned_point: vec2<f32>, unclamped_radii: vec2<f32>) -> f32 {
-    let point = abs(unsigned_point);
-    let radii = max(unclamped_radii, vec2<f32>(MIN_RADIUS));
-    // The iteration has nothing to walk towards from dead centre, and divides
-    // by zero when it tries. The answer there is known anyway.
-    if dot(point, point) < MIN_RADIUS * MIN_RADIUS {
-        return -min(radii.x, radii.y);
-    }
-    let offset = radii * (point - radii);
-    var direction = normalize(select(vec2<f32>(1.0, 0.01), vec2<f32>(0.01, 1.0), offset.x < offset.y));
-
-    for (var step = 0; step < 5; step++) {
-        let along = radii * direction;
-        let across = radii * vec2<f32>(-direction.y, direction.x);
-        let a = dot(point - along, across);
-        let c = dot(point - along, along) + dot(across, across);
-        let b = sqrt(max(c * c - a * a, 0.0));
-        direction = vec2<f32>(
-            direction.x * b - direction.y * a,
-            direction.y * b + direction.x * a,
-        ) / max(c, MIN_RADIUS);
-    }
-
-    let distance = length(point - radii * direction);
-    return select(-distance, distance, dot(point / radii, point / radii) > 1.0);
-}
-
-/// Elliptical cross-section, axis along Y.
-fn cylinder_distance(local_position: vec3<f32>, radii: vec3<f32>) -> f32 {
-    let radial = ellipse_distance(local_position.xz, radii.xz);
-    let edge = vec2<f32>(radial, abs(local_position.y) - radii.y);
-    return min(max(edge.x, edge.y), 0.0) + length(max(edge, vec2<f32>(0.0)));
-}
-
-/// The editor's uber primitive: one function covering box, rounded box,
-/// cylinder, capsule, cone and tube.
+/// A box with its four vertical edges rounded by `side_radius`, its top and
+/// bottom rim by `cap_radius`, and its inside hollowed out to leave a wall of
+/// `wall`. Mirrors `rounded_box_distance` in field.rs.
 ///
-/// `s.xyz` are half sizes and `s.w` is the wall thickness of the hollow form.
-/// `r.x` rounds the four vertical edges, `r.y` the horizontal ones, and `r.z`
-/// tapers the top, widening the bottom by that much in the process - which is
-/// why the pack shrinks `s.xz` by the taper first.
-fn uberprim_distance(local_position: vec3<f32>, packed_s: vec4<f32>, packed_r: vec3<f32>) -> f32 {
-    var s = packed_s;
-    var r = packed_r;
-    s.x -= r.x;
-    s.z -= r.x;
-    r.x -= s.w;
-    s.w -= r.y;
-    s.y -= r.y;
+/// One function reaches every shape the field has: a box at both radii zero, a
+/// sphere when both equal the half extent, a cylinder at `side_radius` equal to
+/// the footprint and `cap_radius` zero, and a tube whenever the wall is less
+/// than the footprint.
+fn rounded_box_distance(
+    local_position: vec3<f32>,
+    half_size: vec3<f32>,
+    wall_arg: f32,
+    side_radius_arg: f32,
+    cap_radius: f32,
+) -> f32 {
+    let inner = vec3<f32>(
+        half_size.x - side_radius_arg,
+        half_size.y - cap_radius,
+        half_size.z - side_radius_arg,
+    );
+    // Both radii come off the shape and off each other's arguments, so a shape
+    // rounded on every edge at once still closes to a sphere.
+    let side_radius = side_radius_arg - wall_arg;
+    let wall = wall_arg - cap_radius;
 
-    let bevel_axis = vec2<f32>(r.z, -2.0 * s.y);
-    let squared = dot(bevel_axis, bevel_axis);
-    let along = select(vec2<f32>(0.0), bevel_axis / squared, squared > 0.0);
-
-    let corner = abs(local_position) - s.xyz;
+    let corner = abs(local_position) - inner;
     let flat = vec2<f32>(corner.x, corner.z);
-    var radial = length(max(flat, vec2<f32>(0.0))) + min(max(flat.x, flat.y), 0.0) - r.x;
-    radial = abs(radial) - s.w;
+    let cross_section = length(max(flat, vec2<f32>(0.0))) + min(max(flat.x, flat.y), 0.0) - side_radius;
 
-    let profile = vec2<f32>(radial, local_position.y - s.y);
-    let diagonal = profile - vec2<f32>(r.z, bevel_axis.y) * clamp(dot(profile, along), 0.0, 1.0);
-    let bottom = vec2<f32>(max(radial - r.z, 0.0), local_position.y + s.y);
-    let top = vec2<f32>(max(radial, 0.0), local_position.y - s.y);
-
-    let nearest = min(dot(diagonal, diagonal), min(dot(bottom, bottom), dot(top, top)));
-    let outside = max(dot(profile, vec2<f32>(-along.y, along.x)), corner.y);
-    return sqrt(nearest) * sign(outside) - r.y;
+    let profile = vec2<f32>(abs(cross_section) - wall, corner.y);
+    return min(max(profile.x, profile.y), 0.0) + length(max(profile, vec2<f32>(0.0))) - cap_radius;
 }
 
-/// The uber primitive's thickness argument at one height.
+/// The wall at one height. Mirrors `bore` in field.rs.
 ///
 /// A tapered shell is a funnel, not a tube of constant wall: the bore closes
 /// off towards the wide end, so the wall thickens as the shape widens and the
-/// hole is a slit at the narrow end. The wall therefore carries whatever taper
-/// has not been spent yet - all of it at the base, none of it at the top, where
-/// the wall matches an untapered shape exactly.
-///
-/// Never more than there is room for, or the two sides pass through each other.
+/// hole is a slit at the narrow end.
 fn bore(wall: f32, unspent_taper: f32, remaining: f32) -> f32 {
     return min(wall + unspent_taper, remaining);
 }
 
-/// A cube's taper narrows its cross-section with height instead of using the
-/// uber primitive's own `r.z`.
+/// A box whose cross-section shrinks with height. Mirrors `tapered_box_distance`
+/// in field.rs.
 ///
-/// That is not a stylistic choice. `r.z` offsets the cross-section outwards,
-/// and offsetting a rectangle outwards rounds its corners, while SDF Modeler
-/// keeps a coned cube perfectly square. It also takes the *same amount* off
-/// every side rather than scaling them, so a long slab tapers to a ridge
-/// instead of shrinking towards a scaled-down copy of its footprint.
-///
-/// Insetting a rectangle costs one divide by the lateral slope to stay a safe
-/// underestimate - a stack of cross-sections overstates the distance by exactly
-/// that factor.
-///
-/// `s.w` is the wall. It goes to the uber primitive as its own thickness
-/// argument, which hollows the shape laterally and leaves the ends open - a
-/// tube, not a cup. Tapered, that tube becomes a funnel; see `bore`.
-fn tapered_uberprim(local_position: vec3<f32>, s: vec4<f32>, r: vec4<f32>) -> f32 {
-    let flat = min(s.x, s.z);
-    if r.z <= 0.0 {
-        return uberprim_distance(
+/// The taper insets the cross-section per height rather than offsetting it: an
+/// offset rounds the corners a taper has to leave square, and it takes the same
+/// amount off every side so a slab tapers to a ridge, not to a scaled copy of
+/// its footprint. Insetting costs one divide by the lateral slope to stay a
+/// safe underestimate.
+fn tapered_box_distance(local_position: vec3<f32>, shape: Shape) -> f32 {
+    let footprint = footprint_of(shape.half_size);
+    if shape.taper <= 0.0 {
+        return rounded_box_distance(
             local_position,
-            vec4<f32>(s.x, s.y, s.z, bore(s.w, 0.0, flat)),
-            vec3<f32>(r.x, r.y, 0.0),
+            shape.half_size,
+            bore(shape.wall_thickness, 0.0, footprint),
+            shape.side_radius,
+            shape.cap_radius,
         );
     }
-    let taper = r.z * flat;
-    let height_fraction = clamp((local_position.y / s.y + 1.0) * 0.5, 0.0, 1.0);
+
+    let taper = shape.taper * footprint;
+    let height_fraction = clamp((local_position.y / shape.half_size.y + 1.0) * 0.5, 0.0, 1.0);
     let inset = taper * height_fraction;
+    let remaining = max(footprint - inset, 0.0);
 
-    let remaining = max(flat - inset, 0.0);
-    let narrowed = vec4<f32>(s.x - inset, s.y, s.z - inset, bore(s.w, taper - inset, remaining));
-    let corner = vec3<f32>(max(r.x - inset, 0.0), r.y, 0.0);
+    let narrowed = vec3<f32>(
+        shape.half_size.x - inset,
+        shape.half_size.y,
+        shape.half_size.z - inset,
+    );
+    let distance = rounded_box_distance(
+        local_position,
+        narrowed,
+        bore(shape.wall_thickness, taper - inset, remaining),
+        max(shape.side_radius - inset, 0.0),
+        shape.cap_radius,
+    );
 
-    let slope = taper / (2.0 * s.y);
-    return uberprim_distance(local_position, narrowed, corner) / sqrt(1.0 + slope * slope);
+    let slope = taper / (2.0 * shape.half_size.y);
+    return distance / sqrt(1.0 + slope * slope);
 }
 
+/// Distance to one brush. Mirrors `shape_distance` in field.rs.
 fn shape_distance(shape: Shape, world_position: vec3<f32>) -> f32 {
-    let local_position =
-        rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
-
-    if shape.brush == BRUSH_SPHERE {
-        return ellipsoid_distance(local_position, shape.s.xyz, shape.s.w);
-    }
-    if shape.brush == BRUSH_CYLINDER {
-        return cylinder_distance(local_position, shape.s.xyz - shape.s.w) - shape.s.w;
-    }
-    return tapered_uberprim(local_position, shape.s, shape.r);
+    let local_position = rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
+    return tapered_box_distance(local_position, shape);
 }
 
 // ----------------------------------------------------------- blend operations
 
 // Every operation takes the incoming shape first and the field built so far
-// second, matching blend_op_ex in the editor's sdf.glsl.
+// second, mirroring the blend operations in field.rs.
 
 fn union_smooth(shape: f32, field: f32, radius: f32) -> f32 {
     let mixture = clamp(0.5 + 0.5 * (field - shape) / radius, 0.0, 1.0);
@@ -391,7 +336,7 @@ fn shape_cannot_reach(shape: Shape, world_position: vec3<f32>, field: f32) -> bo
 
 /// Every shape, in blend order, with the box reject in front of the expensive
 /// part. Each blends against everything before it, so the first simply seeds
-/// the field - the editor does not apply an operation to it either.
+/// the field - the first shape has nothing to blend against.
 ///
 /// `scene_distance_gridded` is what the camera march calls; this is the
 /// fallback for a point outside the grid, and the definition the grid must
@@ -412,7 +357,7 @@ fn scene_distance(world_position: vec3<f32>) -> f32 {
         if i == 0u {
             field = distance;
         } else {
-            field = blend_shape(distance, field, shape.blend, shape.chamfer != 0u);
+            field = blend_shape(distance, field, shape.blend, shape.blend.chamfer != 0u);
         }
     }
     return field;
@@ -500,7 +445,7 @@ fn scene_distance_gridded(world_position: vec3<f32>) -> f32 {
         if evaluated == 0u {
             field = distance;
         } else {
-            field = blend_shape(distance, field, shape.blend, shape.chamfer != 0u);
+            field = blend_shape(distance, field, shape.blend, shape.blend.chamfer != 0u);
         }
         evaluated++;
     }
@@ -531,26 +476,16 @@ fn shadow_proxy_bound(shape: Shape, world_position: vec3<f32>) -> f32 {
         return MAX_MARCH_DISTANCE;
     }
     let local = rotate_by_quaternion(world_position - shape.center, shape.inverse_rotation);
-
-    if shape.brush == BRUSH_SPHERE {
-        // The field's own estimate. It is already compiled in for the camera
-        // march and costs three `pow`, nothing like the uberprim.
-        return ellipsoid_distance(local, shape.s.xyz, shape.s.w);
-    }
-    if shape.brush == BRUSH_CYLINDER {
-        // A round cross-section at the wider radius, which contains the ellipse
-        // the shape actually has - and is exact for a round cylinder, which is
-        // most of them. `ellipse_distance` is five Newton steps and is the one
-        // thing in the field more expensive than the uberprim.
-        let radial = length(local.xz) - max(shape.s.x, shape.s.z);
-        let edge = vec2<f32>(radial, abs(local.y) - shape.s.y);
-        return min(max(edge.x, edge.y), 0.0) + length(max(edge, vec2<f32>(0.0)));
-    }
-    // Every cube modifier only ever removes material - round and bevel cut the
-    // edges, cone narrows the top, thickness hollows an interior nothing sees
-    // from outside. So the plain box contains all of them, and is exact for a
-    // cube nobody has touched.
-    return cull_box_distance(local, shape.s.xyz);
+    // Solid and untapered. Both a wall and a taper only ever remove material,
+    // so the shape without them contains the shape with them - and for a brush
+    // that has neither this is the field itself.
+    return rounded_box_distance(
+        local,
+        shape.half_size,
+        footprint_of(shape.half_size),
+        shape.side_radius,
+        shape.cap_radius,
+    );
 }
 
 /// A lower bound on the field, from cull boxes alone. Mirrors

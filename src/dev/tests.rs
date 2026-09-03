@@ -7,8 +7,9 @@ mod sdf_tests {
 
     // ---------------------------------------------------------------- helpers
 
-    fn placed(shape: SdfShape, placement: Transform, operation: CsgOperation) -> GpuShape {
-        shape.to_gpu(
+    /// A brush placed and blended, with default modifiers: a plain box.
+    fn placed(placement: Transform, operation: CsgOperation) -> GpuShape {
+        pack_brush(
             &GlobalTransform::from(placement),
             None,
             Some(&operation),
@@ -16,13 +17,22 @@ mod sdf_tests {
         )
     }
 
-    fn shaped(shape: SdfShape, placement: Transform, modifiers: Modifiers) -> GpuShape {
-        shape.to_gpu(
+    /// A brush placed and bent, hard-unioned.
+    fn shaped(placement: Transform, modifiers: Modifiers) -> GpuShape {
+        pack_brush(
             &GlobalTransform::from(placement),
             Some(&modifiers),
             None,
             None,
         )
+    }
+
+    /// The modifier set that makes a solid box a sphere of the scale's radius.
+    fn sphere_modifiers() -> Modifiers {
+        Modifiers {
+            round: 1.0,
+            ..default()
+        }
     }
 
     fn union(radius: f32) -> CsgOperation {
@@ -100,7 +110,7 @@ mod sdf_tests {
 
         let mut placed: Vec<Vec3> = app
             .world_mut()
-            .query_filtered::<&GlobalTransform, With<SdfShape>>()
+            .query_filtered::<&GlobalTransform, With<Brush>>()
             .iter(app.world())
             .map(|placement| placement.translation())
             .collect();
@@ -115,7 +125,7 @@ mod sdf_tests {
         assert_eq!(
             placed.len(),
             app.world_mut()
-                .query_filtered::<Entity, With<SdfShape>>()
+                .query_filtered::<Entity, With<Brush>>()
                 .iter(app.world())
                 .count(),
             "every brush should sit where it was written, not stacked at the origin"
@@ -124,16 +134,96 @@ mod sdf_tests {
 
     // ----------------------------------------------- primitives and modifiers
 
+    /// The rounded-box kernel replaced an older combined primitive on
+    /// 2026-09-03, once bevel and taper were the only inputs left that could
+    /// vary. This pins that the two agree everywhere the old one was ever
+    /// called: with its bevel term (`r.z`) at zero, since nothing ever set it.
     #[test]
-    fn sphere_matches_closed_form() {
-        let scene = [placed(SdfShape::Sphere, Transform::IDENTITY, union(0.0))];
-        assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
+    fn the_kernel_matches_the_uberprim_it_replaced() {
+        let mut seed: u64 = 0x5eed_1234;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 16_777_216.0
+        };
+
+        for _ in 0..5000 {
+            let half = Vec3::new(0.2 + next() * 2.0, 0.2 + next() * 2.0, 0.2 + next() * 2.0);
+            let footprint = half.x.min(half.z);
+            // The arguments the uber-primitive was fed: `s.w` a wall no thicker
+            // than the footprint, `r.x`/`r.y` corner radii inside the shape,
+            // `r.z` fixed at zero.
+            let wall = next() * footprint;
+            let side = next() * footprint;
+            let cap = next() * half.y;
+            let point = Vec3::new(
+                (next() - 0.5) * 6.0,
+                (next() - 0.5) * 6.0,
+                (next() - 0.5) * 6.0,
+            );
+
+            let s = half.extend(wall);
+            let r = Vec3::new(side, cap, 0.0);
+            let old = legacy_combined_primitive(point, s, r);
+            let new = rounded_box_in_legacy_terms(point, s, r);
+            assert!(
+                (old - new).abs() < 1e-4,
+                "kernels disagree at {point:?} half {half:?} wall {wall} \
+                 side {side} cap {cap}: old {old}, new {new}"
+            );
+        }
+    }
+
+    /// A full round on a uniform box has to be an exact sphere, not merely a
+    /// round-looking thing: it is the only sphere the field has, the bodies are
+    /// drawn with it, and the collision maths assumes a true radius.
+    #[test]
+    fn a_fully_rounded_box_is_an_exact_sphere() {
+        let scene = [shaped(Transform::IDENTITY, sphere_modifiers())];
+        for probe in [
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(2.0, -1.0, 0.0),
+            Vec3::new(2.0, 2.0, 2.0),
+        ] {
+            let expected = probe.length() - 1.0;
+            let actual = scene_distance(&scene, probe);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "at {probe}: {actual} against an exact sphere's {expected}"
+            );
+        }
         assert!((scene_distance(&scene, Vec3::ZERO) + 1.0).abs() < 1e-5);
+    }
+
+    /// A full bevel is the field's only cylinder, and it has to be exact for
+    /// the same reason: nothing else can draw one.
+    #[test]
+    fn a_fully_bevelled_box_is_an_exact_cylinder() {
+        let scene = [shaped(
+            Transform::IDENTITY,
+            Modifiers {
+                bevel: 1.0,
+                ..default()
+            },
+        )];
+        // Straight out from the curved side.
+        assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
+        // Straight out from a flat cap, along the axis.
+        assert!((scene_distance(&scene, Vec3::new(0.0, 3.0, 0.0)) - 2.0).abs() < 1e-5);
+        // Past the rim, so both offsets count.
+        let rim = scene_distance(&scene, Vec3::new(2.0, 2.0, 0.0));
+        assert!((rim - 2f32.sqrt()).abs() < 1e-5);
+        // Diagonally out in the round plane: the radius is 1 in every
+        // direction, which a box would fail.
+        let across = scene_distance(&scene, Vec3::new(2.0, 0.0, 2.0));
+        assert!((across - (8f32.sqrt() - 1.0)).abs() < 1e-5);
     }
 
     #[test]
     fn box_matches_closed_form_outside_face_edge_and_inside() {
-        let scene = [placed(SdfShape::Cube, Transform::IDENTITY, union(0.0))];
+        let scene = [placed(Transform::IDENTITY, union(0.0))];
         // Straight out from a face.
         assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
         // Diagonally past an edge: sqrt(2) from the corner of the cross section.
@@ -145,28 +235,27 @@ mod sdf_tests {
 
     #[test]
     fn uniform_scale_scales_the_distance() {
-        let scene = [placed(
-            SdfShape::Sphere,
+        let scene = [shaped(
             Transform::from_scale(Vec3::splat(2.0)),
-            union(0.0),
+            sphere_modifiers(),
         )];
         // Radius becomes 2, so a point 5 out is 3 away.
         assert!((scene_distance(&scene, Vec3::new(5.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
     }
 
-    /// The cube brush is SDF Modeler's uber primitive, so its modifiers are not
-    /// separate operations layered on a box - they are arguments that reshape
-    /// it. These are the corners of that parameter space.
+    /// The modifiers are not operations layered on a box - they are arguments
+    /// that reshape it, and they interact. These are the corners of that
+    /// parameter space.
     #[test]
-    fn cube_modifiers_match_the_editors_uber_primitive() {
-        let cube = |modifiers| shaped(SdfShape::Cube, Transform::IDENTITY, modifiers);
+    fn the_modifiers_reach_every_shape_the_field_needs() {
+        let unit_box = |modifiers| shaped(Transform::IDENTITY, modifiers);
 
         // Untouched, it is an ordinary unit box.
-        let plain = cube(Modifiers::default());
+        let plain = unit_box(Modifiers::default());
         assert!((shape_distance(&plain, Vec3::new(2.0, 0.0, 0.0)) - 1.0).abs() < 1e-4);
 
         // Full round works on every edge at once, so a cube becomes a sphere.
-        let ball = cube(Modifiers {
+        let ball = unit_box(Modifiers {
             round: 1.0,
             ..default()
         });
@@ -183,7 +272,7 @@ mod sdf_tests {
         }
 
         // Full bevel rounds only the four vertical edges: a cylinder.
-        let bevelled = cube(Modifiers {
+        let bevelled = unit_box(Modifiers {
             bevel: 1.0,
             ..default()
         });
@@ -197,7 +286,7 @@ mod sdf_tests {
 
         // Full taper closes the top to a point while the base stays put - the
         // pack pre-shrinks the half sizes exactly so this holds.
-        let tapered = cube(Modifiers {
+        let tapered = unit_box(Modifiers {
             cone: 1.0,
             ..default()
         });
@@ -216,7 +305,6 @@ mod sdf_tests {
         // The taper takes the same amount off every side, so a slab three times
         // as long tapers to a ridge, not to a smaller slab of the same shape.
         let ridge = shaped(
-            SdfShape::Cube,
             Transform::from_scale(Vec3::new(3.0, 1.0, 1.0)),
             Modifiers {
                 cone: 1.0,
@@ -234,7 +322,7 @@ mod sdf_tests {
 
         // Taper and corner radius compete for the same footprint. Asking for
         // both at once has to clamp, not collapse the shape.
-        let both = cube(Modifiers {
+        let both = unit_box(Modifiers {
             cone: 1.0,
             bevel: 1.0,
             ..default()
@@ -245,7 +333,7 @@ mod sdf_tests {
         // Thickness below 1 hollows it out without moving the outer surface.
         // Half strength leaves a hole exactly half the shape's width: on a unit
         // cube the wall runs from 0.5 out to 1.0.
-        let hollow = cube(Modifiers {
+        let hollow = unit_box(Modifiers {
             thickness: 0.5,
             ..default()
         });
@@ -262,7 +350,6 @@ mod sdf_tests {
         // A thin plate becomes a frame: the bore goes through its height and
         // its wall is measured against the footprint, not the thickness.
         let plate = shaped(
-            SdfShape::Cube,
             Transform::from_scale(Vec3::new(1.0, 0.1, 1.0)),
             Modifiers {
                 thickness: 0.5,
@@ -274,7 +361,7 @@ mod sdf_tests {
 
         // Thickness 0 is the thinnest wall the shape can have, not a solid one.
         // The two used to collide, because solid was encoded as a zero wall.
-        let paper = cube(Modifiers {
+        let paper = unit_box(Modifiers {
             thickness: 0.0,
             ..default()
         });
@@ -283,7 +370,7 @@ mod sdf_tests {
 
         // Tapered, a shell is a funnel: the bore is a slit at the narrow end
         // and closes off entirely towards the wide one, so the base is solid.
-        let funnel = cube(Modifiers {
+        let funnel = unit_box(Modifiers {
             cone: 0.5,
             thickness: 0.3,
             ..default()
@@ -292,33 +379,12 @@ mod sdf_tests {
         assert!(shape_distance(&funnel, Vec3::new(0.0, 0.95, 0.0)) > 0.0);
     }
 
-    /// Sharpen is a superellipsoid exponent, and at rest it has to leave the
-    /// sphere alone, or every unmodified sphere in the world quietly changes
-    /// shape.
-    #[test]
-    fn sharpen_at_rest_is_a_plain_sphere() {
-        let sphere = shaped(SdfShape::Sphere, Transform::IDENTITY, Modifiers::default());
-        assert!((shape_distance(&sphere, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-4);
-        // Turning it up squares the shape off, so the diagonal gains material.
-        let sharp = shaped(
-            SdfShape::Sphere,
-            Transform::IDENTITY,
-            Modifiers {
-                sharpen: 0.5,
-                ..default()
-            },
-        );
-        let diagonal = Vec3::splat(0.8);
-        assert!(shape_distance(&sharp, diagonal) < shape_distance(&sphere, diagonal));
-    }
-
     // ------------------------------------------------------------ blend modes
 
-    /// The modes past add/subtract/intersect are what SDF Modeler leans on, and
-    /// each is a different arrangement of the same three. Paint is the one that
-    /// must not touch the field at all.
+    /// The modes past add/subtract/intersect are each a different arrangement
+    /// of the same three. Paint is the one that must not touch the field at all.
     #[test]
-    fn blend_modes_follow_the_editors_definitions() {
+    fn blend_modes_are_arrangements_of_the_three_booleans() {
         let mode = |mode| CsgOperation { mode, ..default() };
         // Deep inside the field, and inside the incoming shape too.
         let field = -1.0;
@@ -346,7 +412,7 @@ mod sdf_tests {
             mode: operation.mode,
             radius: operation.radius,
             strength: operation.strength,
-            padding: 0.0,
+            chamfer: u32::from(operation.chamfer),
         }
     }
 
@@ -355,7 +421,6 @@ mod sdf_tests {
     #[test]
     fn rotation_is_applied_in_the_shapes_own_frame() {
         let scene = [placed(
-            SdfShape::Cube,
             Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
             union(0.0),
         )];
@@ -373,7 +438,6 @@ mod sdf_tests {
     #[test]
     fn non_uniform_box_scale_stays_an_exact_distance() {
         let scene = [placed(
-            SdfShape::Cube,
             Transform::from_scale(Vec3::new(4.0, 1.0, 1.0)),
             union(0.0),
         )];
@@ -382,81 +446,22 @@ mod sdf_tests {
         assert!((scene_distance(&scene, Vec3::new(6.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
     }
 
-    /// Brute-force nearest point on an ellipsoid surface, by sampling it.
-    /// Slow and dumb, which is what makes it trustworthy as a reference.
-    fn true_distance_to_ellipsoid(probe: Vec3, radii: Vec3) -> f32 {
-        let mut nearest = f32::MAX;
-        for latitude_step in 0..=180 {
-            let latitude = latitude_step as f32 * std::f32::consts::PI / 180.0;
-            for longitude_step in 0..360 {
-                let longitude = longitude_step as f32 * std::f32::consts::TAU / 360.0;
-                let on_unit_sphere = Vec3::new(
-                    latitude.sin() * longitude.cos(),
-                    latitude.cos(),
-                    latitude.sin() * longitude.sin(),
-                );
-                nearest = nearest.min(probe.distance(on_unit_sphere * radii));
-            }
-        }
-        nearest
-    }
-
+    /// A full bevel makes a non-uniform box a cylinder whose radius and height
+    /// scale independently, and it stays exact on the side, the cap and the
+    /// rim between them.
     #[test]
-    fn ellipsoid_estimate_never_overshoots() {
-        // Overshooting is the one failure that matters: a march step longer
-        // than the real gap walks straight through the surface.
-        let radii = Vec3::new(2.0, 0.5, 1.0);
-        for x in [-4.0, -1.5, 0.3, 2.5, 5.0] {
-            for y in [-3.0, -0.7, 0.9, 4.0] {
-                for z in [-2.5, 0.4, 3.0] {
-                    let probe = Vec3::new(x, y, z);
-                    let reported = ellipsoid_distance(probe, radii, 2.0);
-                    if reported <= 0.0 {
-                        continue; // inside; the surface sample says nothing useful
-                    }
-                    let truth = true_distance_to_ellipsoid(probe, radii);
-                    assert!(
-                        reported <= truth + 1e-3,
-                        "overshot at {probe:?}: said {reported}, truth {truth}"
-                    );
-                }
-            }
-        }
-    }
+    fn a_bevelled_box_is_a_cylinder_exact_on_side_cap_and_corner() {
+        let cylinder = |scale| {
+            shaped(
+                Transform::from_scale(scale),
+                Modifiers {
+                    bevel: 1.0,
+                    ..default()
+                },
+            )
+        };
 
-    #[test]
-    fn elliptical_cylinder_reduces_to_a_round_one() {
-        let round = cylinder_distance(Vec3::new(3.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0));
-        assert!((round - 2.0).abs() < 1e-5);
-        // Stretched on X only: the same probe is now much closer to the wall.
-        let stretched = cylinder_distance(Vec3::new(3.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 1.0));
-        assert!((stretched - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn stretched_sphere_stays_conservative() {
-        let scene = [placed(
-            SdfShape::Sphere,
-            Transform::from_scale(Vec3::new(4.0, 1.0, 1.0)),
-            union(0.0),
-        )];
-        // An ellipsoid has no cheap exact SDF, so the reported distance may be
-        // short - but it must never overshoot, or sphere tracing punches through.
-        let reported = scene_distance(&scene, Vec3::new(0.0, 3.0, 0.0));
-        assert!(reported > 0.0);
-        assert!(
-            reported <= 2.0 + 1e-5,
-            "overshot the true distance: {reported}"
-        );
-    }
-
-    #[test]
-    fn cylinder_matches_closed_form_on_side_cap_and_corner() {
-        let scene = [placed(
-            SdfShape::Cylinder,
-            Transform::from_scale(Vec3::new(1.0, 2.0, 1.0)),
-            union(0.0),
-        )];
+        let scene = [cylinder(Vec3::new(1.0, 2.0, 1.0))];
         // Straight out from the curved side.
         assert!((scene_distance(&scene, Vec3::new(4.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
         // Straight out from a flat cap, along the axis.
@@ -466,18 +471,11 @@ mod sdf_tests {
         assert!((corner - 2f32.sqrt()).abs() < 1e-5);
         // Inside, nearest wall is the curved one.
         assert!((scene_distance(&scene, Vec3::ZERO) + 1.0).abs() < 1e-5);
-    }
 
-    #[test]
-    fn cylinder_height_and_radius_scale_independently() {
-        let scene = [placed(
-            SdfShape::Cylinder,
-            Transform::from_scale(Vec3::new(2.0, 3.0, 2.0)),
-            union(0.0),
-        )];
-        // Radius 2 and half height 3, both exact: the round axes still match.
-        assert!((scene_distance(&scene, Vec3::new(5.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
-        assert!((scene_distance(&scene, Vec3::new(0.0, 7.0, 0.0)) - 4.0).abs() < 1e-5);
+        // Radius and half-height take the footprint and the height separately.
+        let tall = [cylinder(Vec3::new(2.0, 3.0, 2.0))];
+        assert!((scene_distance(&tall, Vec3::new(5.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
+        assert!((scene_distance(&tall, Vec3::new(0.0, 7.0, 0.0)) - 4.0).abs() < 1e-5);
     }
 
     // ---------------------------------------------------------------- physics
@@ -577,12 +575,8 @@ mod sdf_tests {
     #[test]
     fn hard_union_is_the_nearer_of_the_two() {
         let scene = [
-            placed(SdfShape::Sphere, Transform::IDENTITY, union(0.0)),
-            placed(
-                SdfShape::Sphere,
-                Transform::from_xyz(4.0, 0.0, 0.0),
-                union(0.0),
-            ),
+            placed(Transform::IDENTITY, union(0.0)),
+            placed(Transform::from_xyz(4.0, 0.0, 0.0), union(0.0)),
         ];
         assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 0.0).abs() < 1e-5);
     }
@@ -591,20 +585,12 @@ mod sdf_tests {
     fn blending_pulls_the_surface_outwards_between_two_shapes() {
         let apart = 1.6;
         let hard = [
-            placed(SdfShape::Sphere, Transform::IDENTITY, union(0.0)),
-            placed(
-                SdfShape::Sphere,
-                Transform::from_xyz(apart, 0.0, 0.0),
-                union(0.0),
-            ),
+            placed(Transform::IDENTITY, union(0.0)),
+            placed(Transform::from_xyz(apart, 0.0, 0.0), union(0.0)),
         ];
         let blended = [
             hard[0].clone(),
-            placed(
-                SdfShape::Sphere,
-                Transform::from_xyz(apart, 0.0, 0.0),
-                union(0.5),
-            ),
+            placed(Transform::from_xyz(apart, 0.0, 0.0), union(0.5)),
         ];
         // Beside the seam, the blended field must report the surface as nearer.
         let probe = Vec3::new(apart * 0.5, 1.2, 0.0);
@@ -614,13 +600,8 @@ mod sdf_tests {
     #[test]
     fn subtract_carves_a_hole() {
         let scene = [
+            placed(Transform::from_scale(Vec3::splat(2.0)), union(0.0)),
             placed(
-                SdfShape::Cube,
-                Transform::from_scale(Vec3::splat(2.0)),
-                union(0.0),
-            ),
-            placed(
-                SdfShape::Sphere,
                 Transform::IDENTITY,
                 CsgOperation {
                     mode: GPU_MODE_SUBTRACT,
@@ -628,7 +609,7 @@ mod sdf_tests {
                 },
             ),
         ];
-        // The cube centre is now hollow, so the origin sits outside the solid.
+        // The centre is now hollow, so the origin sits outside the solid.
         assert!(scene_distance(&scene, Vec3::ZERO) > 0.0);
         // A point in the remaining shell is still inside.
         assert!(scene_distance(&scene, Vec3::new(1.5, 0.0, 0.0)) < 0.0);
@@ -715,7 +696,7 @@ mod sdf_tests {
                 field = if index == 0 {
                     distance
                 } else {
-                    blend(distance, field, &shape.blend, shape.chamfer != 0)
+                    blend(distance, field, &shape.blend, shape.blend.chamfer != 0)
                 };
             }
             field
@@ -740,12 +721,6 @@ mod sdf_tests {
             let count = 2 + (next() * 8.0) as usize;
             let shapes: Vec<GpuShape> = (0..count)
                 .map(|_| {
-                    let kind = (next() * 3.0) as u32;
-                    let shape = match kind {
-                        0 => SdfShape::Sphere,
-                        1 => SdfShape::Cube,
-                        _ => SdfShape::Cylinder,
-                    };
                     let placement = Transform {
                         translation: Vec3::new(spread!(4.0), spread!(4.0), spread!(4.0)),
                         rotation: Quat::from_euler(
@@ -765,7 +740,6 @@ mod sdf_tests {
                         bevel: next(),
                         thickness: next(),
                         cone: next(),
-                        sharpen: next() * 0.9,
                     };
                     // Every mode, so the modes that must never be culled are
                     // exercised as hard as ADD is.
@@ -775,7 +749,7 @@ mod sdf_tests {
                         radius: next() * 0.8,
                         strength: next() * 0.5,
                     };
-                    shape.to_gpu(
+                    pack_brush(
                         &GlobalTransform::from(placement),
                         Some(&modifiers),
                         Some(&operation),
@@ -803,7 +777,7 @@ mod sdf_tests {
         let far = Vec3::new(30.0, 0.0, 0.0);
         let near_field = 1.0;
 
-        let added = placed(SdfShape::Cube, Transform::IDENTITY, union(0.0));
+        let added = placed(Transform::IDENTITY, union(0.0));
         assert!(shape_cannot_reach(&added, far, near_field));
         // Close enough to matter: the box is nearer than the field.
         assert!(!shape_cannot_reach(
@@ -822,11 +796,7 @@ mod sdf_tests {
             GPU_MODE_DEBOSS,
             GPU_MODE_SHELL,
         ] {
-            let other = placed(
-                SdfShape::Cube,
-                Transform::IDENTITY,
-                CsgOperation { mode, ..default() },
-            );
+            let other = placed(Transform::IDENTITY, CsgOperation { mode, ..default() });
             assert!(
                 !shape_cannot_reach(&other, far, near_field),
                 "mode {mode} was culled without a proof that it is safe to"
@@ -834,25 +804,37 @@ mod sdf_tests {
         }
     }
 
-    /// The bound has to survive the shape the ellipsoid estimate is worst on: a
-    /// long thin one, where the returned distance is a fraction of the true
-    /// one. Sampling along the long axis is where a naive box bound breaks.
+    /// The cull bound has to survive the one shape whose estimate is not exact:
+    /// a taper, which divides the whole distance down to stay conservative on
+    /// its sloped face. Sampling around it is where an un-inflated box bound
+    /// would overshoot.
     #[test]
-    fn the_cull_bound_holds_under_a_stretched_ellipsoid() {
+    fn the_cull_bound_holds_under_a_taper() {
         let shape = shaped(
-            SdfShape::Sphere,
-            Transform::from_scale(Vec3::new(4.0, 0.2, 0.2)),
-            Modifiers::default(),
+            Transform::from_scale(Vec3::new(2.0, 3.0, 2.0)),
+            Modifiers {
+                cone: 1.0,
+                ..default()
+            },
         );
+        // The bound is a lower bound only outside the surface; a cull box
+        // reports zero rather than a negative depth inside one.
+        let mut checked = 0;
         for step in 1..200 {
-            let point = Vec3::new(step as f32 * 0.15, 0.3, -0.2);
+            let point = Vec3::new(3.0 + step as f32 * 0.03, step as f32 * 0.04 - 3.0, -0.2);
+            let estimate = shape_distance(&shape, point);
+            if estimate <= 0.0 {
+                continue;
+            }
             let bound =
                 shape.cull_scale * cull_box_distance(point - shape.center, shape.cull_extent);
             assert!(
-                bound <= shape_distance(&shape, point) + 1e-4,
-                "bound {bound} overshot the estimate at {point:?}"
+                bound <= estimate + 1e-4,
+                "bound {bound} overshot the estimate {estimate} at {point:?}"
             );
+            checked += 1;
         }
+        assert!(checked > 50, "only {checked} points were outside the taper");
     }
     // ----------------------------------------------------------- bench scenes
 
@@ -959,12 +941,6 @@ mod sdf_tests {
             // paper over.
             let shapes: Vec<GpuShape> = (0..2 + (next() * 6.0) as usize)
                 .map(|_| {
-                    let kind = (next() * 3.0) as u32;
-                    let shape = match kind {
-                        0 => SdfShape::Sphere,
-                        1 => SdfShape::Cube,
-                        _ => SdfShape::Cylinder,
-                    };
                     let placement = Transform {
                         translation: Vec3::new(spread!(6.0), spread!(6.0), spread!(6.0)),
                         rotation: Quat::from_euler(
@@ -983,7 +959,7 @@ mod sdf_tests {
                         radius: next() * 0.5,
                         ..default()
                     };
-                    shape.to_gpu(
+                    pack_brush(
                         &GlobalTransform::from(placement),
                         Some(&Modifiers::default()),
                         Some(&operation),
@@ -1058,11 +1034,6 @@ mod sdf_tests {
             for _ in 0..40 {
                 let shapes: Vec<GpuShape> = (0..2 + (next() * 8.0) as usize)
                     .map(|_| {
-                        let shape = match (next() * 3.0) as u32 {
-                            0 => SdfShape::Sphere,
-                            1 => SdfShape::Cube,
-                            _ => SdfShape::Cylinder,
-                        };
                         let placement = Transform {
                             translation: Vec3::new(spread!(8.0), spread!(8.0), spread!(8.0)),
                             rotation: Quat::from_euler(
@@ -1083,7 +1054,7 @@ mod sdf_tests {
                             radius: next() * 0.6,
                             strength: next() * 0.5,
                         };
-                        shape.to_gpu(
+                        pack_brush(
                             &GlobalTransform::from(placement),
                             Some(&Modifiers::default()),
                             Some(&operation),
@@ -1135,11 +1106,6 @@ mod sdf_tests {
         for _ in 0..40 {
             let shapes: Vec<GpuShape> = (0..3 + (next() * 8.0) as usize)
                 .map(|_| {
-                    let shape = match (next() * 3.0) as u32 {
-                        0 => SdfShape::Sphere,
-                        1 => SdfShape::Cube,
-                        _ => SdfShape::Cylinder,
-                    };
                     let placement = Transform {
                         translation: Vec3::new(spread!(9.0), spread!(9.0), spread!(9.0)),
                         rotation: Quat::from_euler(
@@ -1158,7 +1124,7 @@ mod sdf_tests {
                         radius: next() * 0.5,
                         ..default()
                     };
-                    shape.to_gpu(
+                    pack_brush(
                         &GlobalTransform::from(placement),
                         Some(&Modifiers::default()),
                         Some(&operation),
@@ -1222,7 +1188,6 @@ mod sdf_tests {
 
         let cube_at = |position: Vec3| {
             shaped(
-                SdfShape::Cube,
                 Transform {
                     translation: position,
                     scale: Vec3::splat(0.8),
@@ -1359,7 +1324,6 @@ mod sdf_tests {
 
         let shapes = vec![
             shaped(
-                SdfShape::Cube,
                 Transform {
                     translation: Vec3::new(0.0, -0.5, 0.0),
                     scale: Vec3::new(20.0, 1.0, 20.0),
@@ -1367,11 +1331,7 @@ mod sdf_tests {
                 },
                 Modifiers::default(),
             ),
-            shaped(
-                SdfShape::Sphere,
-                Transform::from_xyz(0.0, 1.5, 0.0),
-                Modifiers::default(),
-            ),
+            shaped(Transform::from_xyz(0.0, 1.5, 0.0), sphere_modifiers()),
         ];
 
         let (bounds_min, bounds_max) = scene_bounds(&shapes);
@@ -1461,7 +1421,6 @@ mod sdf_tests {
 
         let shapes = vec![
             shaped(
-                SdfShape::Cube,
                 Transform {
                     translation: Vec3::new(0.0, -0.5, 0.0),
                     scale: Vec3::new(20.0, 1.0, 20.0),
@@ -1469,17 +1428,12 @@ mod sdf_tests {
                 },
                 Modifiers::default(),
             ),
-            shaped(
-                SdfShape::Sphere,
-                Transform::from_xyz(0.0, 1.5, 0.0),
-                Modifiers::default(),
-            ),
+            shaped(Transform::from_xyz(0.0, 1.5, 0.0), sphere_modifiers()),
             // Turned and rounded, so the bound has to be built in the shape's
             // own frame and has to survive a modifier eating into the box it
             // is measured against. An axis-aligned bound was one of the two
             // things wrong with the first version of this proxy.
             shaped(
-                SdfShape::Cube,
                 Transform {
                     translation: Vec3::new(-5.0, 1.0, 3.0),
                     rotation: Quat::from_rotation_y(0.6) * Quat::from_rotation_z(0.35),
@@ -1490,16 +1444,18 @@ mod sdf_tests {
                     ..default()
                 },
             ),
-            // Elliptical, so the round cross-section the proxy substitutes is
-            // strictly wider than the shape and the bound is strictly loose.
+            // Tapered, so the proxy - which drops the taper - substitutes the
+            // untapered box and is strictly looser than the shape near the top.
             shaped(
-                SdfShape::Cylinder,
                 Transform {
                     translation: Vec3::new(5.0, 1.2, -2.0),
                     scale: Vec3::new(2.0, 1.2, 0.6),
                     ..default()
                 },
-                Modifiers::default(),
+                Modifiers {
+                    cone: 0.7,
+                    ..default()
+                },
             ),
         ];
 

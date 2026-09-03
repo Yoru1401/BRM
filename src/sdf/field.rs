@@ -10,12 +10,15 @@
 
 use bevy::{
     prelude::*,
-    render::{render_resource::ShaderType, storage::ShaderBuffer},
+    render::{
+        render_resource::{ShaderType, encase::internal::WriteInto},
+        storage::ShaderBuffer,
+    },
 };
 
 use crate::args;
 use crate::game::world::SdfWorld;
-use crate::sdf::render::{Quad, SdfMaterial};
+use crate::sdf::render::{Quad, RenderParams, SdfMaterial};
 
 pub(crate) struct FieldPlugin;
 
@@ -42,27 +45,43 @@ pub(crate) const MAX_SHAPES: usize = 256;
 
 // ----------------------------------------------------------------- components
 
-/// Which primitive a shape is. The unit shape only; its size lives in the
-/// entity's `Transform`, exactly as SDF Modeler stores scale separately.
+/// One brush in the field. A brush is always a box; its size is the entity's
+/// `Transform` scale and its shape is its [`Modifiers`].
+///
+/// There is one primitive on purpose. Four modifiers over a box reach every
+/// shape the field needs, and two of them land exactly:
+///
+/// | round | bevel | cone | shape |
+/// |-------|-------|------|-------|
+/// | 0 | 0 | 0 | box |
+/// | **1** | - | 0 | sphere, exactly |
+/// | 0 | **1** | 0 | cylinder, exactly |
+/// | 0 | 0 | **1** | pyramid |
+/// | 0 | **1** | **1** | cone |
+///
+/// A second primitive would be a second distance function in both evaluators,
+/// and the sphere and cylinder it replaced were the two most expensive things
+/// in the field.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SdfShape {
-    Sphere,
-    #[default]
-    Cube,
-    Cylinder,
-}
+pub(crate) struct Brush;
 
-/// SDF Modeler's surface modifiers, each normalised 0..1. Which ones apply
-/// depends on the brush: the editor offers Sharpen only on a sphere, Round only
-/// on a cylinder, and all four of Thickness / Cone / Bevel / Round on a cube.
+/// What a box is bent into, each normalised 0..1.
+///
+/// They compose, and they compete for the same footprint: asking for a full
+/// round and a full taper at once clamps rather than collapsing the shape.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Modifiers {
+    /// Rounds every edge at once. At full strength a box becomes a sphere and
+    /// an oblong box becomes a capsule.
     pub(crate) round: f32,
+    /// Rounds the four vertical edges only, leaving the top and bottom flat.
+    /// At full strength the cross-section is a circle: a cylinder.
     pub(crate) bevel: f32,
     /// 1.0 is solid; below that the shape is a shell of that fraction.
     pub(crate) thickness: f32,
+    /// Narrows the shape towards its top. At full strength the top closes to a
+    /// point.
     pub(crate) cone: f32,
-    pub(crate) sharpen: f32,
 }
 
 impl Default for Modifiers {
@@ -72,7 +91,6 @@ impl Default for Modifiers {
             bevel: 0.0,
             thickness: 1.0,
             cone: 0.0,
-            sharpen: 0.0,
         }
     }
 }
@@ -100,52 +118,61 @@ impl Default for CsgOperation {
 
 // ------------------------------------------------------------ the packed form
 
-/// The blend half of `GpuShape`, split out so both halves stay readable and the
-/// struct keeps its 16-byte rows.
+/// How a brush combines with the field built before it. One 16-byte row of
+/// [`GpuShape`].
 #[derive(ShaderType, Debug, Clone, PartialEq, Default)]
 pub(crate) struct GpuBlend {
     pub(crate) mode: u32,
-    /// Smoothing width, `k` in the editor's shaders.
+    /// Width of the smooth or chamfered seam. Zero is a hard union.
     pub(crate) radius: f32,
-    /// `r` in the editor's shaders. Only the offset-based modes read it.
+    /// How far the offset-based modes push, emboss and deboss the field. The
+    /// other modes ignore it.
     pub(crate) strength: f32,
-    pub(crate) padding: f32,
+    /// Squares the seam off instead of rounding it.
+    pub(crate) chamfer: u32,
 }
 
 /// Storage-buffer layout. Must match `struct Shape` in sdf.wgsl.
+///
+/// Every field is a named scalar rather than a packed vector, and the rows are
+/// arranged so each `Vec3` starts on a 16-byte boundary. Both evaluators index
+/// this by name, which is the only defence against the two of them drifting.
 #[derive(ShaderType, Debug, Clone, PartialEq, Default)]
 pub(crate) struct GpuShape {
     pub(crate) center: Vec3,
-    pub(crate) brush: u32,
-    /// `xyz` are world-space half sizes with scale baked in. `w` depends on the
-    /// brush: wall thickness for a cube, the superellipsoid exponent for a
-    /// sphere, the rim radius for a cylinder.
-    pub(crate) s: Vec4,
-    /// Cube only, the uber primitive's radii: `x` rounds the vertical edges,
-    /// `y` the horizontal ones, `z` is the taper.
-    pub(crate) r: Vec4,
-    /// Rotates a world-space offset into the shape's local frame, so every
+    /// Half the wall of a hollow shape, in world units. Equal to the footprint
+    /// when the shape is solid - see [`wall_thickness`].
+    pub(crate) wall_thickness: f32,
+    /// World-space half extent, scale baked in.
+    pub(crate) half_size: Vec3,
+    /// Rounds the four vertical edges, so it is the corner radius of the
+    /// cross-section. Equal to the footprint makes that cross-section a circle.
+    pub(crate) side_radius: f32,
+    /// Rotates a world-space offset into the brush's local frame, so every
     /// distance function stays written in its own axis-aligned terms.
     pub(crate) inverse_rotation: Vec4,
     /// Linear RGB.
     pub(crate) albedo: Vec3,
-    pub(crate) chamfer: u32,
-    /// Half the axis-aligned box used to reject this shape cheaply. Not the
-    /// shape's own bounding box: it is inflated so that `cull_scale` times the
-    /// distance to it is a true lower bound on what `shape_distance` returns.
+    /// Rounds the top and bottom rim.
+    pub(crate) cap_radius: f32,
+    /// Half the axis-aligned box used to reject this brush cheaply. Not its
+    /// bounding box: it is inflated so that `cull_scale` times the distance to
+    /// it is a true lower bound on what [`shape_distance`] returns.
     pub(crate) cull_extent: Vec3,
     /// How much the evaluator can undershoot the real distance. 1.0 where the
-    /// primitive is exact; below it where the estimate is deliberately
-    /// conservative, as the ellipsoid's is.
+    /// shape is exact, below it where the estimate is deliberately
+    /// conservative - as a taper's is.
     pub(crate) cull_scale: f32,
+    /// How much of the footprint the top loses, as a fraction. 1.0 closes it to
+    /// a point.
+    pub(crate) taper: f32,
+    pub(crate) padding_one: f32,
+    pub(crate) padding_two: f32,
+    pub(crate) padding_three: f32,
     pub(crate) blend: GpuBlend,
 }
 
-const GPU_BRUSH_SPHERE: u32 = 0;
-const GPU_BRUSH_CUBE: u32 = 1;
-const GPU_BRUSH_CYLINDER: u32 = 2;
-
-// Blend modes, values as SDF Modeler's common.glsl defines them.
+// Blend modes, mirrored by the `MODE_` constants in sdf.wgsl.
 pub(crate) const GPU_MODE_ADD: u32 = 0;
 pub(crate) const GPU_MODE_SUBTRACT: u32 = 1;
 pub(crate) const GPU_MODE_INTERSECT: u32 = 2;
@@ -206,136 +233,109 @@ const DEFAULT_ALBEDO: Vec3 = Vec3::new(1.0, 0.4, 0.2);
 
 // -------------------------------------------------------------------- packing
 
-impl SdfShape {
-    /// Packs one shape the way SDF Modeler feeds its own shader.
-    ///
-    /// The editor turns the normalised modifiers into shader arguments inside
-    /// its binary, not in the GLSL, so this conversion was fitted against
-    /// `sdf_uberprim` directly: the numbers below are the ones that make the
-    /// field come out with its base at `scale` and its modifiers behaving the
-    /// way the editor draws them.
-    pub(crate) fn to_gpu(
-        self,
-        placement: &GlobalTransform,
-        modifiers: Option<&Modifiers>,
-        operation: Option<&CsgOperation>,
-        albedo: Option<&Albedo>,
-    ) -> GpuShape {
-        let (scale, rotation, translation) = placement.to_scale_rotation_translation();
-        let size = scale.abs().max(Vec3::splat(f32::EPSILON));
-        let inverse_rotation = rotation.inverse();
-        let modifiers = modifiers.copied().unwrap_or_default();
-        let operation = operation.copied().unwrap_or_default();
+/// Packs one brush into the bytes both evaluators read.
+pub(crate) fn pack_brush(
+    placement: &GlobalTransform,
+    modifiers: Option<&Modifiers>,
+    operation: Option<&CsgOperation>,
+    albedo: Option<&Albedo>,
+) -> GpuShape {
+    let (scale, rotation, translation) = placement.to_scale_rotation_translation();
+    let half_size = scale.abs().max(Vec3::splat(f32::EPSILON));
+    let modifiers = modifiers.copied().unwrap_or_default();
+    let operation = operation.copied().unwrap_or_default();
+    let (side_radius, cap_radius) = corner_radii(&modifiers, half_size);
 
-        let (brush, s, r) = match self {
-            SdfShape::Sphere => (
-                GPU_BRUSH_SPHERE,
-                size.extend(sharpen_exponent(modifiers.sharpen)),
-                Vec4::ZERO,
-            ),
-            SdfShape::Cylinder => {
-                let rim = modifiers.round * size.min_element();
-                (GPU_BRUSH_CYLINDER, size.extend(rim), Vec4::ZERO)
-            }
-            SdfShape::Cube => {
-                let flat = size.x.min(size.z);
-                // Round works on every edge at once - at full strength a box
-                // becomes a capsule, and a cube a sphere. Bevel only rounds the
-                // four vertical ones, so the two share `r.x` and the stronger
-                // wins.
-                let rounded = modifiers.round * size.min_element();
-                let bevelled = modifiers.bevel * flat;
-                (
-                    GPU_BRUSH_CUBE,
-                    Vec4::new(
-                        size.x,
-                        size.y,
-                        size.z,
-                        wall_thickness(modifiers.thickness, flat),
-                    ),
-                    Vec4::new(
-                        rounded.max(bevelled).min(flat),
-                        rounded.min(size.y),
-                        modifiers.cone,
-                        0.0,
-                    ),
-                )
-            }
-        };
-
-        let mut packed = GpuShape {
-            center: translation,
-            brush,
-            s,
-            r,
-            inverse_rotation: Vec4::new(
-                inverse_rotation.x,
-                inverse_rotation.y,
-                inverse_rotation.z,
-                inverse_rotation.w,
-            ),
-            albedo: albedo.map(|albedo| albedo.0).unwrap_or(DEFAULT_ALBEDO),
+    let mut packed = GpuShape {
+        center: translation,
+        wall_thickness: wall_thickness(modifiers.thickness, footprint_of(half_size)),
+        half_size,
+        side_radius,
+        inverse_rotation: quaternion_words(rotation.inverse()),
+        albedo: albedo.map_or(DEFAULT_ALBEDO, |albedo| albedo.0),
+        cap_radius,
+        cull_extent: Vec3::ZERO,
+        cull_scale: 1.0,
+        taper: modifiers.cone,
+        padding_one: 0.0,
+        padding_two: 0.0,
+        padding_three: 0.0,
+        blend: GpuBlend {
+            mode: operation.mode,
+            radius: operation.radius,
+            strength: operation.strength,
             chamfer: u32::from(operation.chamfer),
-            cull_extent: Vec3::ZERO,
-            cull_scale: 1.0,
-            blend: GpuBlend {
-                mode: operation.mode,
-                radius: operation.radius,
-                strength: operation.strength,
-                padding: 0.0,
-            },
-        };
-        (packed.cull_extent, packed.cull_scale) = cull_bound(&packed);
-        packed
-    }
+        },
+    };
+    (packed.cull_extent, packed.cull_scale) = cull_bound(&packed);
+    packed
 }
 
-/// The uber primitive's thickness argument: half the wall, because it grows the
-/// wall both ways from the surface it offsets. Measured against the footprint,
-/// since the bore runs through the shape's height.
+/// The narrower of the two horizontal half extents. Round, bevel and taper are
+/// all measured against it, so a plate tapers to a ridge rather than to a
+/// smaller plate of the same proportions.
+fn footprint_of(half_size: Vec3) -> f32 {
+    half_size.x.min(half_size.z)
+}
+
+/// Round and bevel, resolved into the two corner radii the distance function
+/// takes: one for the vertical edges, one for the top and bottom rim.
+///
+/// They share the vertical-edge radius and the stronger wins, which is what
+/// makes a full round a sphere and a full bevel a cylinder. Both are clamped so
+/// a radius can never exceed the shape it is rounding.
+fn corner_radii(modifiers: &Modifiers, half_size: Vec3) -> (f32, f32) {
+    let footprint = footprint_of(half_size);
+    let rounded = modifiers.round * half_size.min_element();
+    let bevelled = modifiers.bevel * footprint;
+    (
+        rounded.max(bevelled).min(footprint),
+        rounded.min(half_size.y),
+    )
+}
+
+/// A quaternion as the four words the shader reads it back as.
+fn quaternion_words(rotation: Quat) -> Vec4 {
+    Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w)
+}
+
+/// Half the wall of a hollow shape, because the wall grows both ways from the
+/// surface it offsets. Measured against the footprint, since the bore runs
+/// through the shape's height.
 ///
 /// Thickness runs the other way from a wall: 1.0 is solid and 0.0 is as thin as
 /// the wall can get. Solid is its own case rather than the limit - a wall that
 /// exactly meets itself reads as a surface everywhere inside, and physics and
 /// the normals need a real interior. It must not be confused with a wall of
 /// zero, which is a real setting meaning the thinnest possible shell.
-fn wall_thickness(thickness: f32, flat: f32) -> f32 {
+fn wall_thickness(thickness: f32, footprint: f32) -> f32 {
     if thickness >= 1.0 {
-        return flat;
+        return footprint;
     }
-    thickness * flat * 0.5
+    thickness * footprint * 0.5
 }
 
-/// Sharpen, as a superellipsoid exponent. 0 is a plain ellipsoid; turning it up
-/// squares the sphere off while keeping its curvature.
-///
-/// ponytail: the curve from the slider to the exponent is a guess with the
-/// right endpoints. Compare a sharpened sphere against the editor before
-/// trusting the middle of the range.
-fn sharpen_exponent(sharpen: f32) -> f32 {
-    2.0 / (1.0 - sharpen.clamp(0.0, 0.95))
-}
-
-/// Everything needed to pack one shape. Named because statics and bodies are
+/// Everything needed to pack one brush. Named because statics and bodies are
 /// queried separately but read identically.
-type ShapeQuery = (
-    &'static SdfShape,
+type BrushQuery = (
+    &'static Brush,
     &'static GlobalTransform,
     Option<&'static Modifiers>,
     Option<&'static CsgOperation>,
     Option<&'static Albedo>,
 );
 
-fn pack_shape(
-    (shape, placement, modifiers, operation, albedo): (
-        &SdfShape,
+/// The query row, in the argument order [`pack_brush`] wants.
+fn pack_queried_brush(
+    (_, placement, modifiers, operation, albedo): (
+        &Brush,
         &GlobalTransform,
         Option<&Modifiers>,
         Option<&CsgOperation>,
         Option<&Albedo>,
     ),
 ) -> GpuShape {
-    shape.to_gpu(placement, modifiers, operation, albedo)
+    pack_brush(placement, modifiers, operation, albedo)
 }
 
 /// Mirrors every `SdfShape` entity into the material's storage buffer, and
@@ -348,33 +348,15 @@ fn pack_shape(
 #[allow(clippy::too_many_arguments)] // one system, one job: pack and upload
 pub(crate) fn sync_shapes_to_gpu(
     world: Single<&Children, With<SdfWorld>>,
-    shapes: Query<ShapeQuery>,
-    bodies: Query<ShapeQuery, With<SphereBody>>,
+    statics: Query<BrushQuery>,
+    bodies: Query<BrushQuery, With<SphereBody>>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut scene: ResMut<SdfScene>,
     settings: Res<GridSettings>,
 ) {
-    // In `Children` order, which is the order they were authored in. A plain
-    // query would hand them back grouped by archetype instead, and any shape
-    // that subtracts or intersects would land in the wrong place in the fold.
-    let mut packed: Vec<GpuShape> = world
-        .iter()
-        .filter_map(|brush| shapes.get(brush).ok())
-        .map(pack_shape)
-        .collect();
-    let mut static_count = packed.len();
-    packed.extend(bodies.iter().map(pack_shape));
-
-    if packed.len() > MAX_SHAPES {
-        warn!(
-            "scene has {} shapes, buffer holds {MAX_SHAPES}; the rest are dropped",
-            packed.len()
-        );
-        packed.truncate(MAX_SHAPES);
-        static_count = static_count.min(MAX_SHAPES);
-    }
+    let (packed, static_count) = collect_brushes(&world, &statics, &bodies);
 
     // Repacking is cheap; the upload, the grid rebuild and the bind-group
     // rebuild are not. A still scene should cost none of them.
@@ -388,107 +370,209 @@ pub(crate) fn sync_shapes_to_gpu(
         return;
     };
     let (bounds_min, bounds_max) = scene_bounds(&scene.shapes);
-    material.render_params.bounds_min = bounds_min;
-    material.render_params.bounds_max = bounds_max;
-    material.render_params.shape_count = scene.shapes.len() as u32;
-
     let grid = build_grid(&scene.shapes, bounds_min, bounds_max, settings.resolution);
-    material.render_params.grid = u32::from(settings.enabled);
-    material.render_params.grid_resolution = grid.resolution;
-    material.render_params.grid_origin = grid.origin;
-    material.render_params.grid_cell = grid.cell_size;
+    describe_scene_to_shader(
+        &mut material.render_params,
+        &scene.shapes,
+        (bounds_min, bounds_max),
+        &grid,
+        &settings,
+    );
 
-    let handles = (
+    let (shape_buffer, cell_buffer, index_buffer) = (
         material.shapes.clone(),
         material.grid_cells.clone(),
         material.grid_indices.clone(),
     );
-    if let Some(mut buffer) = buffers.get_mut(&handles.0) {
-        let mut padded = scene.shapes.clone();
-        padded.resize(MAX_SHAPES, GpuShape::default());
-        buffer.set_data(padded);
-    }
-    if let Some(mut buffer) = buffers.get_mut(&handles.1) {
-        let mut padded = grid.cells.clone();
-        padded.resize(GRID_CELL_WORDS, 0);
-        buffer.set_data(padded);
-    }
-    if let Some(mut buffer) = buffers.get_mut(&handles.2) {
-        let mut padded = grid.indices.clone();
-        padded.resize(GRID_INDEX_WORDS, 0);
-        buffer.set_data(padded);
-    }
+    upload_padded(&mut buffers, &shape_buffer, &scene.shapes, MAX_SHAPES);
+    upload_padded(&mut buffers, &cell_buffer, &grid.cells, GRID_CELL_WORDS);
+    upload_padded(&mut buffers, &index_buffer, &grid.indices, GRID_INDEX_WORDS);
     scene.grid = grid;
 }
 
-// The primitives and blend operations below are ports of SDF Modeler's own
-// shaders/sdf.glsl, so a scene authored against the editor evaluates to the
-// field it drew. Where a name appears there, it is kept here.
+/// Every brush in blend order, followed by the bodies, and how many of them are
+/// static.
+///
+/// The statics come from the root's `Children`, which is the order they were
+/// authored in. A plain query hands them back grouped by archetype instead, and
+/// any brush that subtracts or intersects would land in the wrong place in the
+/// fold.
+fn collect_brushes(
+    world: &Children,
+    statics: &Query<BrushQuery>,
+    bodies: &Query<BrushQuery, With<SphereBody>>,
+) -> (Vec<GpuShape>, usize) {
+    let mut packed: Vec<GpuShape> = world
+        .iter()
+        .filter_map(|brush| statics.get(brush).ok())
+        .map(pack_queried_brush)
+        .collect();
+    let mut static_count = packed.len();
+    packed.extend(bodies.iter().map(pack_queried_brush));
+
+    if packed.len() > MAX_SHAPES {
+        warn!(
+            "scene has {} brushes, buffer holds {MAX_SHAPES}; the rest are dropped",
+            packed.len()
+        );
+        packed.truncate(MAX_SHAPES);
+        static_count = static_count.min(MAX_SHAPES);
+    }
+    (packed, static_count)
+}
+
+/// Everything the shader needs to know about the scene as a whole, as opposed
+/// to about one brush.
+fn describe_scene_to_shader(
+    params: &mut RenderParams,
+    shapes: &[GpuShape],
+    bounds: (Vec3, Vec3),
+    grid: &SdfGrid,
+    settings: &GridSettings,
+) {
+    (params.bounds_min, params.bounds_max) = bounds;
+    params.shape_count = shapes.len() as u32;
+    params.grid = u32::from(settings.enabled);
+    params.grid_resolution = grid.resolution;
+    params.grid_origin = grid.origin;
+    params.grid_cell = grid.cell_size;
+}
+
+/// Writes `values` into a fixed-size storage buffer, zero-filling the rest.
+///
+/// The buffers are never resized. A resize makes Bevy rebuild the GPU buffer
+/// while the material's bind group still points at the old one, so the shader
+/// reads a stale, truncated scene.
+fn upload_padded<T>(
+    buffers: &mut Assets<ShaderBuffer>,
+    handle: &Handle<ShaderBuffer>,
+    values: &[T],
+    capacity: usize,
+) where
+    T: Clone + Default,
+    Vec<T>: ShaderType + WriteInto,
+{
+    let Some(mut buffer) = buffers.get_mut(handle) else {
+        return;
+    };
+    let mut padded = values.to_vec();
+    padded.resize_with(capacity, T::default);
+    buffer.set_data(padded);
+}
 
 // ------------------------------------------------------------------ the field
 
-/// Superellipsoid. `exponent` 2 is a plain ellipsoid; larger values square it
-/// off towards a bevelled box, which is the editor's Sharpen modifier. Scaling
-/// by the smallest radius is what keeps it from overshooting.
-pub(crate) fn ellipsoid_distance(local_point: Vec3, radii: Vec3, exponent: f32) -> f32 {
-    let radii = radii.max(Vec3::splat(MIN_RADIUS));
-    let scaled = (local_point / radii).abs().powf(exponent);
-    ((scaled.x + scaled.y + scaled.z).powf(1.0 / exponent) - 1.0) * radii.min_element()
-}
-
-/// Exact distance to an ellipse, by five Newton steps around the boundary.
-/// Exact matters here because it is the cylinder's whole cross-section.
-fn ellipse_distance(point: Vec2, radii: Vec2) -> f32 {
-    let point = point.abs();
-    let radii = radii.max(Vec2::splat(MIN_RADIUS));
-    // The iteration has nothing to walk towards from dead centre, and divides
-    // by zero when it tries. The answer there is known anyway.
-    if point.length_squared() < MIN_RADIUS * MIN_RADIUS {
-        return -radii.min_element();
-    }
-    let offset = radii * (point - radii);
-    let mut direction = if offset.x < offset.y {
-        Vec2::new(0.01, 1.0)
-    } else {
-        Vec2::new(1.0, 0.01)
-    }
-    .normalize();
-
-    for _ in 0..5 {
-        let along = radii * direction;
-        let across = radii * Vec2::new(-direction.y, direction.x);
-        let a = (point - along).dot(across);
-        let c = (point - along).dot(along) + across.dot(across);
-        let b = (c * c - a * a).max(0.0).sqrt();
-        direction = Vec2::new(
-            direction.x * b - direction.y * a,
-            direction.y * b + direction.x * a,
-        ) / c.max(MIN_RADIUS);
-    }
-
-    let distance = (point - radii * direction).length();
-    if (point / radii).length_squared() > 1.0 {
-        distance
-    } else {
-        -distance
-    }
-}
-
-/// Elliptical cross-section, axis along Y.
-pub(crate) fn cylinder_distance(local_point: Vec3, radii: Vec3) -> f32 {
-    let radial = ellipse_distance(local_point.xz(), radii.xz());
-    let edge = Vec2::new(radial, local_point.y.abs() - radii.y);
-    edge.max_element().min(0.0) + edge.max(Vec2::ZERO).length()
-}
-
-/// The editor's uber primitive: one function covering box, rounded box,
-/// cylinder, capsule, cone and tube.
+/// Distance to one brush: a box, with its edges rounded, its top narrowed and
+/// its inside hollowed out, in whatever combination the modifiers asked for.
 ///
-/// `s.xyz` are half sizes and `s.w` is the wall thickness of the hollow form.
-/// `r.x` rounds the four vertical edges, `r.y` the horizontal ones, and `r.z`
-/// tapers the top, widening the bottom by that much in the process - which is
-/// why `SdfShape::to_gpu` shrinks `s.xz` by the taper before packing.
-fn uberprim_distance(local_point: Vec3, s: Vec4, r: Vec3) -> f32 {
+/// Mirrored by `shape_distance` in sdf.wgsl.
+pub(crate) fn shape_distance(shape: &GpuShape, world_point: Vec3) -> f32 {
+    let local_point = Quat::from_vec4(shape.inverse_rotation) * (world_point - shape.center);
+    tapered_box_distance(local_point, shape)
+}
+
+/// A box whose cross-section shrinks with height.
+///
+/// The taper is applied by insetting the cross-section per height rather than
+/// by the offset a rounded box would use. Offsetting a rectangle outwards
+/// rounds its corners, and a taper has to leave a square base square. It also
+/// takes the *same amount* off every side rather than scaling them, so a long
+/// slab tapers to a ridge instead of to a scaled-down copy of its footprint.
+///
+/// Insetting costs one divide by the lateral slope to stay a safe
+/// underestimate: a stack of cross-sections overstates the distance by exactly
+/// that factor, and an overstatement is what lets a march step through a
+/// surface.
+fn tapered_box_distance(local_point: Vec3, shape: &GpuShape) -> f32 {
+    let footprint = footprint_of(shape.half_size);
+    if shape.taper <= 0.0 {
+        return rounded_box_distance(
+            local_point,
+            shape.half_size,
+            bore(shape.wall_thickness, 0.0, footprint),
+            shape.side_radius,
+            shape.cap_radius,
+        );
+    }
+
+    let taper = shape.taper * footprint;
+    let height_fraction = ((local_point.y / shape.half_size.y + 1.0) * 0.5).clamp(0.0, 1.0);
+    let inset = taper * height_fraction;
+    let remaining = (footprint - inset).max(0.0);
+
+    let narrowed = Vec3::new(
+        shape.half_size.x - inset,
+        shape.half_size.y,
+        shape.half_size.z - inset,
+    );
+    let distance = rounded_box_distance(
+        local_point,
+        narrowed,
+        bore(shape.wall_thickness, taper - inset, remaining),
+        (shape.side_radius - inset).max(0.0),
+        shape.cap_radius,
+    );
+
+    let slope = taper / (2.0 * shape.half_size.y);
+    distance / (1.0 + slope * slope).sqrt()
+}
+
+/// A box with its four vertical edges rounded by `side_radius`, its top and
+/// bottom rim by `cap_radius`, and its inside hollowed out to leave a wall of
+/// `wall`.
+///
+/// One function reaches every shape the field has: a box at both radii zero, a
+/// sphere when both equal the half extent, a cylinder at `side_radius` equal to
+/// the footprint and `cap_radius` zero, and a tube whenever the wall is less
+/// than the footprint.
+///
+/// The construction is the usual one. Shrink the box by its radii, measure the
+/// distance to what is left, then add the radius back - that rounds every
+/// corner the shrunken box has. `abs()` on the cross-section is what hollows
+/// it: it folds the solid into a wall either side of the old surface.
+fn rounded_box_distance(
+    local_point: Vec3,
+    half_size: Vec3,
+    wall: f32,
+    side_radius: f32,
+    cap_radius: f32,
+) -> f32 {
+    let inner = Vec3::new(
+        half_size.x - side_radius,
+        half_size.y - cap_radius,
+        half_size.z - side_radius,
+    );
+    // Both radii are taken off the shape *and* off each other's arguments, so
+    // a shape rounded on every edge at once still closes to a sphere rather
+    // than over-rounding into nothing.
+    let side_radius = side_radius - wall;
+    let wall = wall - cap_radius;
+
+    let corner = local_point.abs() - inner;
+    let flat = Vec2::new(corner.x, corner.z);
+    let cross_section = flat.max(Vec2::ZERO).length() + flat.max_element().min(0.0) - side_radius;
+
+    let profile = Vec2::new(cross_section.abs() - wall, corner.y);
+    profile.max_element().min(0.0) + profile.max(Vec2::ZERO).length() - cap_radius
+}
+
+/// The wall at one height.
+///
+/// A tapered shell is a funnel, not a tube of constant wall: the bore closes
+/// off towards the wide end, so the wall thickens as the shape widens and the
+/// hole is a slit at the narrow end. The wall therefore carries whatever taper
+/// has not been spent yet - all of it at the base, none of it at the top, where
+/// the wall matches an untapered shape exactly.
+///
+/// Never more than there is room for, or the two sides pass through each other.
+pub(crate) fn bore(wall: f32, unspent_taper: f32, remaining: f32) -> f32 {
+    (wall + unspent_taper).min(remaining)
+}
+
+/// The combined primitive the rounded-box kernel replaced, kept only so
+/// `the_kernel_matches_the_uberprim_it_replaced` can check they agree.
+#[cfg(test)]
+pub(crate) fn legacy_combined_primitive(local_point: Vec3, s: Vec4, r: Vec3) -> f32 {
     let mut s = s;
     let mut r = r;
     s.x -= r.x;
@@ -523,77 +607,17 @@ fn uberprim_distance(local_point: Vec3, s: Vec4, r: Vec3) -> f32 {
     nearest.sqrt() * outside.signum() - r.y
 }
 
-/// A cube's taper narrows its cross-section with height instead of using the
-/// uber primitive's own `r.z`.
-///
-/// That is not a stylistic choice. `r.z` offsets the cross-section outwards,
-/// and offsetting a rectangle outwards rounds its corners, while SDF Modeler
-/// keeps a coned cube perfectly square. It also takes the *same amount* off
-/// every side rather than scaling them, so a long slab tapers to a ridge
-/// instead of shrinking towards a scaled-down copy of its footprint.
-///
-/// Insetting a rectangle costs one divide by the lateral slope to stay a safe
-/// underestimate - a stack of cross-sections overstates the distance by exactly
-/// that factor.
-///
-/// `s.w` is the wall. It goes to the uber primitive as its own thickness
-/// argument, which hollows the shape laterally and leaves the ends open - a
-/// tube, not a cup. Tapered, that tube becomes a funnel; see `bore`.
-fn tapered_uberprim(local_point: Vec3, s: Vec4, r: Vec4) -> f32 {
-    let flat = s.x.min(s.z);
-    if r.z <= 0.0 {
-        return uberprim_distance(
-            local_point,
-            s.truncate().extend(bore(s.w, 0.0, flat)),
-            r.truncate().with_z(0.0),
-        );
-    }
-    let taper = r.z * flat;
-    let height_fraction = ((local_point.y / s.y + 1.0) * 0.5).clamp(0.0, 1.0);
-    let inset = taper * height_fraction;
-
-    let remaining = (flat - inset).max(0.0);
-    let narrowed = Vec4::new(
-        s.x - inset,
-        s.y,
-        s.z - inset,
-        bore(s.w, taper - inset, remaining),
-    );
-    let corner = Vec3::new((r.x - inset).max(0.0), r.y, 0.0);
-
-    let slope = taper / (2.0 * s.y);
-    uberprim_distance(local_point, narrowed, corner) / (1.0 + slope * slope).sqrt()
-}
-
-/// The uber primitive's thickness argument at one height.
-///
-/// A tapered shell is a funnel, not a tube of constant wall: the bore closes
-/// off towards the wide end, so the wall thickens as the shape widens and the
-/// hole is a slit at the narrow end. The wall therefore carries whatever taper
-/// has not been spent yet - all of it at the base, none of it at the top, where
-/// the wall matches an untapered shape exactly.
-///
-/// Never more than there is room for, or the two sides pass through each other.
-pub(crate) fn bore(wall: f32, unspent_taper: f32, remaining: f32) -> f32 {
-    (wall + unspent_taper).min(remaining)
-}
-
-pub(crate) fn shape_distance(shape: &GpuShape, world_point: Vec3) -> f32 {
-    let inverse_rotation = Quat::from_vec4(shape.inverse_rotation);
-    let local_point = inverse_rotation * (world_point - shape.center);
-    match shape.brush {
-        GPU_BRUSH_SPHERE => ellipsoid_distance(local_point, shape.s.truncate(), shape.s.w),
-        GPU_BRUSH_CYLINDER => {
-            cylinder_distance(local_point, shape.s.truncate() - shape.s.w) - shape.s.w
-        }
-        _ => tapered_uberprim(local_point, shape.s, shape.r),
-    }
+/// The simplified kernel, in the legacy one's argument shape, so the test can
+/// drive both from the same random inputs.
+#[cfg(test)]
+pub(crate) fn rounded_box_in_legacy_terms(local_point: Vec3, s: Vec4, r: Vec3) -> f32 {
+    rounded_box_distance(local_point, s.truncate(), s.w, r.x, r.y)
 }
 
 // ----------------------------------------------------------- blend operations
 
 /// Every operation takes the incoming shape first and the field built so far
-/// second, matching `blend_op_ex` in the editor's sdf.glsl.
+/// second. Mirrored by the same names in sdf.wgsl.
 fn union_smooth(shape: f32, field: f32, radius: f32) -> f32 {
     let mix = (0.5 + 0.5 * (field - shape) / radius).clamp(0.0, 1.0);
     field.lerp(shape, mix) - radius * mix * (1.0 - mix)
@@ -614,7 +638,7 @@ fn intersect_smooth(shape: f32, field: f32, radius: f32) -> f32 {
 /// evaluators read alike.
 ///
 /// At radius zero the smooth ops divide by zero, so they fall back to the plain
-/// boolean they smooth - which is also what the editor draws.
+/// boolean they smooth.
 fn op_union(shape: f32, field: f32, radius: f32, chamfer: bool) -> f32 {
     if chamfer {
         return shape.min(field).min((shape - 0.5 * radius + field) * 0.5);
@@ -678,18 +702,23 @@ pub(crate) fn blend(shape: f32, field: f32, blend: &GpuBlend, chamfer: bool) -> 
 /// Half the world-space size of a shape's axis-aligned bounding box, plus the
 /// slack a smooth blend can push the surface outwards by.
 fn shape_half_extent(shape: &GpuShape) -> Vec3 {
-    // `s.xyz` holds world-space half sizes for every brush, and a taper only
-    // ever narrows the shape from there.
-    let local_extent = shape.s.truncate();
-    // Rotating a box grows its AABB by |R| * extent, taking each axis's
-    // contribution regardless of sign.
-    let rotation = Mat3::from_quat(Quat::from_vec4(shape.inverse_rotation).inverse());
+    // A taper only ever narrows the shape from its half size, so the untapered
+    // box bounds every shape a brush can be.
+    world_aligned_extent(shape.half_size, shape.inverse_rotation) + Vec3::splat(shape.blend.radius)
+}
+
+/// Half the world-axis-aligned box holding a rotated local box.
+///
+/// Rotating a box grows its AABB by `|R| * extent`, taking each axis's
+/// contribution regardless of sign.
+fn world_aligned_extent(local_extent: Vec3, inverse_rotation: Vec4) -> Vec3 {
+    let rotation = Mat3::from_quat(Quat::from_vec4(inverse_rotation).inverse());
     let unsigned = Mat3::from_cols(
         rotation.x_axis.abs(),
         rotation.y_axis.abs(),
         rotation.z_axis.abs(),
     );
-    unsigned * local_extent + Vec3::splat(shape.blend.radius)
+    unsigned * local_extent
 }
 
 /// Slack on the culling box. A surface sitting exactly on the boundary is only
@@ -1010,7 +1039,7 @@ pub(crate) fn scene_distance_gridded(
         field = if evaluated == 0 {
             distance
         } else {
-            blend(distance, field, &shape.blend, shape.chamfer != 0)
+            blend(distance, field, &shape.blend, shape.blend.chamfer != 0)
         };
         evaluated += 1;
     }
@@ -1057,28 +1086,17 @@ pub(crate) fn shadow_proxy_bound(shape: &GpuShape, world_point: Vec3) -> f32 {
     if shape.blend.mode != GPU_MODE_ADD {
         return MAX_MARCH_DISTANCE;
     }
-    let local = Quat::from_vec4(shape.inverse_rotation) * (world_point - shape.center);
-    let half = shape.s.truncate();
-
-    match shape.brush {
-        // The field's own estimate. It is already compiled in for the camera
-        // march and costs three `powf`, nothing like the uberprim.
-        GPU_BRUSH_SPHERE => ellipsoid_distance(local, half, shape.s.w),
-        // A round cross-section at the wider radius, which contains the ellipse
-        // the shape actually has - and is exact for a round cylinder, which is
-        // most of them. `ellipse_distance` is five Newton steps and is the one
-        // thing in the field more expensive than the uberprim.
-        GPU_BRUSH_CYLINDER => {
-            let radial = local.xz().length() - half.x.max(half.z);
-            let edge = Vec2::new(radial, local.y.abs() - half.y);
-            edge.max_element().min(0.0) + edge.max(Vec2::ZERO).length()
-        }
-        // Every cube modifier only ever removes material - round and bevel cut
-        // the edges, cone narrows the top, thickness hollows an interior
-        // nothing sees from outside. So the plain box contains all of them, and
-        // is exact for a cube nobody has touched.
-        _ => cull_box_distance(local, half),
-    }
+    let local_point = Quat::from_vec4(shape.inverse_rotation) * (world_point - shape.center);
+    // Solid and untapered. Both a wall and a taper only ever remove material,
+    // so the shape without them contains the shape with them - and for a brush
+    // that has neither this is not a bound at all but the field itself.
+    rounded_box_distance(
+        local_point,
+        shape.half_size,
+        footprint_of(shape.half_size),
+        shape.side_radius,
+        shape.cap_radius,
+    )
 }
 
 #[allow(dead_code)]
@@ -1129,8 +1147,8 @@ pub(crate) fn scene_normal(shapes: &[GpuShape], world_point: Vec3) -> Vec3 {
 /// Distance to the whole scene. Mirrors `scene_distance` in sdf.wgsl.
 ///
 /// Shapes are applied in order and each one blends against everything before
-/// it, so the first shape simply seeds the field - the editor does not apply an
-/// operation to it either.
+/// it, so the first shape simply seeds the field, with nothing to blend
+/// against.
 pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
     let mut field = MAX_MARCH_DISTANCE;
     for (index, shape) in shapes.iter().enumerate() {
@@ -1141,7 +1159,7 @@ pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
         field = if index == 0 {
             distance
         } else {
-            blend(distance, field, &shape.blend, shape.chamfer != 0)
+            blend(distance, field, &shape.blend, shape.blend.chamfer != 0)
         };
     }
     field
@@ -1193,34 +1211,15 @@ pub(crate) fn shape_cannot_reach(shape: &GpuShape, world_point: Vec3, field: f32
 /// the ADD predicate hold for a smooth or chamfered union as well as a hard
 /// one.
 fn cull_bound(shape: &GpuShape) -> (Vec3, f32) {
-    let size = shape.s.truncate();
-    let (local_extent, scale) = match shape.brush {
-        // The superellipsoid estimate is `(||p/r||e - 1) * min(r)`, which along
-        // the longest axis is only `min(r)/max(r)` of the true distance. Any
-        // norm is at least the infinity norm, so bounding the box by
-        // `sqrt(3) * max(r)` covers every exponent and every direction.
-        GPU_BRUSH_SPHERE => {
-            let reach = 3.0f32.sqrt() * size.max_element();
-            (Vec3::splat(reach), size.min_element() / reach)
-        }
-        // The taper divides the whole distance by `sqrt(1 + slope^2)` to keep
-        // it conservative on the sloped face, so the estimate falls short by
-        // exactly that.
-        GPU_BRUSH_CUBE => {
-            let slope = (shape.r.z * size.x.min(size.z)) / (2.0 * size.y.max(MIN_RADIUS));
-            (size, 1.0 / (1.0 + slope * slope).sqrt())
-        }
-        // Exact: the ellipse is solved by Newton, the rim is an offset.
-        _ => (size, 1.0),
-    };
-    let rotation = Mat3::from_quat(Quat::from_vec4(shape.inverse_rotation).inverse());
-    let unsigned = Mat3::from_cols(
-        rotation.x_axis.abs(),
-        rotation.y_axis.abs(),
-        rotation.z_axis.abs(),
-    );
+    // The taper divides the whole distance by `sqrt(1 + slope^2)` to stay
+    // conservative on the sloped face, so the estimate falls short by exactly
+    // that and the box has to be inflated by the same factor.
+    let footprint = footprint_of(shape.half_size);
+    let slope = (shape.taper * footprint) / (2.0 * shape.half_size.y.max(MIN_RADIUS));
+    let scale = 1.0 / (1.0 + slope * slope).sqrt();
     (
-        unsigned * local_extent + Vec3::splat(shape.blend.radius / scale),
+        world_aligned_extent(shape.half_size, shape.inverse_rotation)
+            + Vec3::splat(shape.blend.radius / scale),
         scale,
     )
 }

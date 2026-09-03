@@ -15,11 +15,12 @@ physics. There is no separate collision geometry to keep in step.
   pixel, against a uniform grid of per-cell shape lists. Over-relaxed steps
   (Keinert et al.). The fragment stage writes real depth, so ordinary Bevy 3D
   entities share the world and occlude correctly.
-- **Geometry** — one entity per brush, authored in `bsn!`. Brushes carry
-  `SdfShape` + `Transform` + `Modifiers` + `CsgOperation` + `Albedo` and blend
-  in child order. The modifier set (round, bevel, thickness, cone, sharpen) is
-  a port of SDF Modeler's, matched against the editor shape by shape.
-- **Physics** — sphere rigidbodies against the field, with rotation, friction,
+- **Geometry** — one entity per brush, authored in `bsn!`. Every brush is a
+  box; `Transform` sets its size, `Modifiers { round, bevel, thickness, cone }`
+  its shape, and `CsgOperation` + `Albedo` how it blends and looks. A full
+  round is an exact sphere, a full bevel an exact cylinder, a cone a pyramid.
+  Brushes blend in child order.
+- **Physics** — sphere rigidbodies (a fully-rounded brush) against the field, with rotation, friction,
   a Coulomb limit and sleep.
 
 ## Run

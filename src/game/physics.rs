@@ -6,7 +6,9 @@
 use bevy::prelude::*;
 
 use crate::args;
-use crate::sdf::field::{Albedo, SdfScene, SdfShape, SphereBody, scene_distance, scene_normal};
+use crate::sdf::field::{
+    Albedo, Brush, Modifiers, SdfScene, SphereBody, scene_distance, scene_normal,
+};
 
 pub(crate) struct PhysicsPlugin;
 
@@ -317,7 +319,13 @@ fn spawn_bodies(mut commands: Commands) {
                 orientation: Quat::IDENTITY,
                 resting: false,
             },
-            SdfShape::Sphere,
+            Brush,
+            // A full round on a uniform box is exactly a sphere of that
+            // radius, which is what the collision maths already assumes.
+            Modifiers {
+                round: 1.0,
+                ..default()
+            },
             Albedo(BODY_ALBEDO),
             Transform::from_translation(position).with_scale(Vec3::splat(radius)),
         ));

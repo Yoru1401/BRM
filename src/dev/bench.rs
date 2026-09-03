@@ -46,7 +46,7 @@ use bevy::{
 
 use crate::args;
 use crate::game::world::SdfWorld;
-use crate::sdf::field::{Albedo, GridSettings, SdfShape};
+use crate::sdf::field::{Albedo, Brush, GridSettings};
 use crate::sdf::light::{Light, LightKind};
 use crate::sdf::render::{Quad, SdfMaterial};
 
@@ -198,7 +198,7 @@ fn spawn_bench_scene(mut commands: Commands, bench: Res<Bench>) {
             for (index, placement) in layout.into_iter().enumerate() {
                 let (x, y, z) = cell_of(index, per_axis);
                 world.spawn((
-                    SdfShape::Cube,
+                    Brush,
                     placement,
                     // A colour per cell, so a wrong layout is visible rather
                     // than silently measured.
@@ -314,7 +314,7 @@ fn record(
     mut frames: ResMut<Frames>,
     time: Res<Time>,
     bench: Res<Bench>,
-    shapes: Query<(), With<SdfShape>>,
+    brushes: Query<(), With<Brush>>,
     grid: Res<GridSettings>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     materials: Res<Assets<SdfMaterial>>,
@@ -355,7 +355,7 @@ fn record(
     println!(
         "run\t{}\tscene\t{scene}\tshapes\t{}\tcull\t{}\tomega\t{:.2}\tgrid\t{}\tlights\t{}\tshadows\t{}\tsteps\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
         frames.done + 1,
-        shapes.iter().count(),
+        brushes.iter().count(),
         if params.cull == 1 { "on" } else { "off" },
         params.omega,
         if grid.enabled {
