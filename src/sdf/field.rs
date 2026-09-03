@@ -6,7 +6,7 @@ use bevy::{
     },
 };
 
-use crate::game::world::SdfWorld;
+use crate::game::scenes::SdfWorld;
 use crate::sdf::blending::blend;
 use crate::sdf::bounds::{scene_bounds, shape_cannot_reach};
 use crate::sdf::brush::{

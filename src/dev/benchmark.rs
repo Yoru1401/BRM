@@ -4,7 +4,7 @@ use bevy::{
 };
 
 use crate::command_line;
-use crate::game::world::SdfWorld;
+use crate::game::scenes::SdfWorld;
 use crate::sdf::brush::{Albedo, Brush};
 use crate::sdf::grid::GridSettings;
 use crate::sdf::light::{Light, LightKind};

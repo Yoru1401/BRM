@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use super::helpers::*;
-use crate::game::world::*;
+use crate::game::scenes::SdfWorld;
+use crate::game::scenes::showcase::world_scene;
 use crate::sdf::brush::*;
 use crate::sdf::distance::*;
 use crate::sdf::field::*;

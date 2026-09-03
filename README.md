@@ -82,6 +82,24 @@ stays a `const` beside it.
 cargo run --release -- --speed 12 --gravity 3
 ```
 
+## Scenes
+
+Documentation you walk through rather than read. `--scene` works on an ordinary
+run, a `shot` and a `bench` alike.
+
+```sh
+cargo run --release -- --scene zoo
+```
+
+| scene | what it is |
+|---|---|
+| `showcase` (default) | the authored world |
+| `zoo` | every shape the four modifiers reach, swept in code so it cannot fall out of date |
+| `museum` | the nine blend modes and the field behaviours that surprise people |
+| `gym` | physics: ramps by angle, drop lanes, the tube, the sleep pad |
+
+The overlay names the nearest exhibit and what it is for.
+
 ## Screenshot
 
 ```sh

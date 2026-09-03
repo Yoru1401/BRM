@@ -34,13 +34,13 @@ fn main() {
 
         (None, Some(path)) => {
             app.add_plugins((
-                game::world::WorldPlugin,
+                game::scenes::ScenePlugin(game::scenes::requested()),
                 dev::screenshot::ScreenshotPlugin(path),
             ));
         }
         (None, None) => {
             app.add_plugins((
-                game::world::WorldPlugin,
+                game::scenes::ScenePlugin(game::scenes::requested()),
                 game::physics::PhysicsPlugin,
                 game::overlay::OverlayPlugin,
             ));

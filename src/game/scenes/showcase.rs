@@ -1,17 +1,10 @@
 use bevy::prelude::*;
 
-use crate::sdf::brush::{Albedo, Brush, CsgOperation, GPU_MODE_SUBTRACT, Modifiers};
+use crate::game::scenes::SdfWorld;
+use crate::sdf::brush::{Albedo, Brush, CsgOperation, GPU_MODE_SUBTRACT, Modifiers, SphereBody};
 use crate::sdf::light::{Light, LightKind};
 
-pub(crate) struct WorldPlugin;
-
-impl Plugin for WorldPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_world, spawn_lights));
-    }
-}
-
-fn spawn_lights(mut commands: Commands) {
+pub(crate) fn spawn_lights(mut commands: Commands) {
     commands.spawn((
         Light {
             kind: LightKind::Directional,
@@ -48,12 +41,46 @@ fn spawn_lights(mut commands: Commands) {
     ));
 }
 
-#[derive(Component, Default, Clone)]
-pub(crate) struct SdfWorld;
-
-fn spawn_world(mut commands: Commands) {
+pub(crate) fn spawn(mut commands: Commands) {
     commands.spawn_scene(world_scene());
+    for (position, radius) in DROPS {
+        commands.spawn((
+            SphereBody {
+                radius,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+                orientation: Quat::IDENTITY,
+                resting: false,
+            },
+            Brush,
+            Modifiers {
+                round: 1.0,
+                ..default()
+            },
+            Albedo(BODY_ALBEDO),
+            Transform::from_translation(position).with_scale(Vec3::splat(radius)),
+        ));
+    }
 }
+
+const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
+
+const DROPS: [(Vec3, f32); 14] = [
+    (Vec3::new(-3.00, 4.0, 2.00), 0.30),
+    (Vec3::new(-2.85, 5.5, 2.10), 0.28),
+    (Vec3::new(-3.15, 7.0, 1.90), 0.32),
+    (Vec3::new(-3.00, 8.5, 2.15), 0.26),
+    (Vec3::new(-2.90, 10.0, 1.85), 0.30),
+    (Vec3::new(-3.10, 11.5, 2.00), 0.28),
+    (Vec3::new(0.00, 5.0, -3.00), 0.35),
+    (Vec3::new(0.15, 6.5, -2.90), 0.30),
+    (Vec3::new(-0.10, 8.0, -3.10), 0.38),
+    (Vec3::new(0.05, 9.5, -3.00), 0.32),
+    (Vec3::new(3.00, 5.0, -3.00), 0.40),
+    (Vec3::new(3.20, 6.5, -2.85), 0.35),
+    (Vec3::new(2.80, 8.0, -3.20), 0.45),
+    (Vec3::new(3.05, 9.5, -3.00), 0.38),
+];
 
 pub(crate) fn world_scene() -> impl Scene {
     let stone = Vec3::new(0.30, 0.32, 0.35);

@@ -5,6 +5,7 @@ use bevy::{
 };
 use core::time::Duration;
 
+use crate::game::scenes::{Exhibit, Scene, nearest_exhibit};
 use crate::sdf::field::{SdfScene, scene_distance};
 use crate::sdf::render::{MainCamera, Quad, SdfMaterial};
 
@@ -49,6 +50,8 @@ fn update_stats(
     materials: Res<Assets<SdfMaterial>>,
     scene: Res<SdfScene>,
     camera: Single<&GlobalTransform, With<MainCamera>>,
+    exhibits: Query<(&Exhibit, &GlobalTransform)>,
+    active_scene: Res<Scene>,
 ) {
     fn avg(store: &DiagnosticsStore, path: &DiagnosticPath) -> f64 {
         store.get(path).and_then(|d| d.average()).unwrap_or(0.0)
@@ -83,6 +86,27 @@ fn update_stats(
         let cells = render_params.grid_resolution;
         format!("{}x{}x{} cells", cells.x, cells.y, cells.z)
     };
+    let caption = match nearest_exhibit(camera.translation(), &exhibits) {
+        Some((name, note, distance)) if distance < 6.0 => format!(
+            "
+
+{name}
+{note}"
+        ),
+        Some((name, _, _)) => format!(
+            "
+
+nearest: {name}"
+        ),
+        None => String::new(),
+    };
+    let scene = match *active_scene {
+        Scene::Showcase => "showcase",
+        Scene::Zoo => "zoo",
+        Scene::Museum => "museum",
+        Scene::Gym => "gym",
+    };
+
     text.into_inner().0 = format!(
         "{fps:.1} fps avg\n\
          {ms:.3} ms avg\n\
@@ -91,7 +115,8 @@ fn update_stats(
          quad: {shown}  [V]\n\
          view: {view}  [H]\n\
          cpu sdf here: {distance_here:.3}\n\
-         shapes: {shapes}  bounds: {:.0} x {:.0} x {:.0}",
+         shapes: {shapes}  bounds: {:.0} x {:.0} x {:.0}
+         scene: {scene}{caption}",
         span.x, span.y, span.z
     );
 }

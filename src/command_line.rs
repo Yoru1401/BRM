@@ -11,6 +11,12 @@ pub(crate) fn value_in(arguments: &[String], name: &str) -> Option<f32> {
     arguments.get(at + 1)?.parse().ok()
 }
 
+pub(crate) fn text(name: &str) -> Option<String> {
+    let arguments: Vec<String> = std::env::args().collect();
+    let at = arguments.iter().position(|argument| argument == name)?;
+    arguments.get(at + 1).cloned()
+}
+
 pub(crate) fn positional(index: usize) -> Option<String> {
     std::env::args().nth(index + 1)
 }

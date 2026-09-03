@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::command_line;
-use crate::sdf::brush::{Albedo, Brush, Modifiers, SphereBody};
+use crate::sdf::brush::SphereBody;
 use crate::sdf::field::{SdfScene, scene_distance, scene_normal};
 
 pub(crate) struct PhysicsPlugin;
@@ -15,8 +15,7 @@ impl Plugin for PhysicsPlugin {
                     .chain()
                     .run_if(static_field_is_ready),
             )
-            .add_systems(Update, draw_body_spin)
-            .add_systems(Startup, spawn_bodies);
+            .add_systems(Update, draw_body_spin);
     }
 }
 
@@ -227,42 +226,5 @@ pub(crate) fn despawn_fallen_bodies(
         if placement.translation.y < KILL_BELOW {
             commands.entity(entity).despawn();
         }
-    }
-}
-
-fn spawn_bodies(mut commands: Commands) {
-    let drops = [
-        (Vec3::new(-3.00, 4.0, 2.00), 0.30),
-        (Vec3::new(-2.85, 5.5, 2.10), 0.28),
-        (Vec3::new(-3.15, 7.0, 1.90), 0.32),
-        (Vec3::new(-3.00, 8.5, 2.15), 0.26),
-        (Vec3::new(-2.90, 10.0, 1.85), 0.30),
-        (Vec3::new(-3.10, 11.5, 2.00), 0.28),
-        (Vec3::new(0.00, 5.0, -3.00), 0.35),
-        (Vec3::new(0.15, 6.5, -2.90), 0.30),
-        (Vec3::new(-0.10, 8.0, -3.10), 0.38),
-        (Vec3::new(0.05, 9.5, -3.00), 0.32),
-        (Vec3::new(3.00, 5.0, -3.00), 0.40),
-        (Vec3::new(3.20, 6.5, -2.85), 0.35),
-        (Vec3::new(2.80, 8.0, -3.20), 0.45),
-        (Vec3::new(3.05, 9.5, -3.00), 0.38),
-    ];
-    for (position, radius) in drops {
-        commands.spawn((
-            SphereBody {
-                radius,
-                velocity: Vec3::ZERO,
-                angular_velocity: Vec3::ZERO,
-                orientation: Quat::IDENTITY,
-                resting: false,
-            },
-            Brush,
-            Modifiers {
-                round: 1.0,
-                ..default()
-            },
-            Albedo(BODY_ALBEDO),
-            Transform::from_translation(position).with_scale(Vec3::splat(radius)),
-        ));
     }
 }
