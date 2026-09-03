@@ -3,7 +3,7 @@
 #import "shaders/scene.wgsl"::{scene_distance, scene_distance_gridded}
 
 fn pixel_radius_per_unit() -> f32 {
-    return render_params.tan_half_fov / max(view.viewport.w, 1.0);
+    return render_params.detail * render_params.tan_half_fov / max(view.viewport.w, 1.0);
 }
 
 fn ray_march(

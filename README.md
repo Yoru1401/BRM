@@ -69,6 +69,8 @@ stays a `const` beside it.
 | `--grid <n>` / `--no-grid` | 16 | acceleration grid cells along the longest axis |
 | `--no-cull` | on | the per-shape box reject |
 | `--shadow-steps <n>` | 48 | steps a shadow ray may take |
+| `--detail <n>` | 1.0 | march stopping tolerance, in pixels. 1.5 at 1080p is 720p's tolerance and 21% cheaper |
+| `--width <n>` / `--height <n>` | 1280 / 720 | window size for `bench` and `shot` |
 | `--speed <n>` | 5.0 | fly camera |
 | `--sensitivity <n>` | 0.003 | mouse look |
 | `--gravity <n>` | 9.81 | downward pull |

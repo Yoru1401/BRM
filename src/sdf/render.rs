@@ -54,6 +54,7 @@ const QUAD_OVERSCAN: f32 = 1.01;
 pub(crate) const OMEGA: f32 = 1.2;
 
 pub(crate) const SHADOW_STEPS: u32 = 48;
+pub(crate) const DETAIL: f32 = 1.0;
 
 #[derive(Component)]
 pub(crate) struct Quad;
@@ -86,7 +87,7 @@ pub(crate) struct RenderParams {
     pub(crate) light_count: u32,
 
     pub(crate) shadow_steps: u32,
-    pub(crate) shadow_padding: u32,
+    pub(crate) detail: f32,
     pub(crate) shadow_padding_two: u32,
     pub(crate) shadow_padding_three: u32,
 }
@@ -139,6 +140,7 @@ fn spawn_camera(
                         omega: command_line::value("--omega").unwrap_or(OMEGA),
                         shadow_steps: command_line::value("--shadow-steps")
                             .map_or(SHADOW_STEPS, |steps| steps as u32),
+                        detail: command_line::value("--detail").unwrap_or(DETAIL),
 
                         grid: 1,
                         ..default()

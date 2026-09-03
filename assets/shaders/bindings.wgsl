@@ -17,7 +17,7 @@ struct RenderParams {
     grid_resolution: vec3<u32>,
     light_count: u32,
     shadow_steps: u32,
-    shadow_padding: u32,
+    detail: f32,
     shadow_padding_two: u32,
     shadow_padding_three: u32,
 };
