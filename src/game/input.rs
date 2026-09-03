@@ -1,19 +1,9 @@
-//! Player input, as actions rather than keys.
-//!
-//! Systems ask "is [`Action::Forward`] held", never "is `KeyW` held". The
-//! mapping lives in one [`Bindings`] resource, so rebinding is a resource edit
-//! and nothing else moves.
-//!
-//! The action state is a plain `ButtonInput<Action>` - the same type Bevy uses
-//! for keys - so `pressed`, `just_pressed` and `just_released` all come for
-//! free, and consumers read it exactly the way they read the keyboard before.
-
 use bevy::{
     input::{InputSystems, mouse::AccumulatedMouseMotion},
     prelude::*,
 };
 
-use crate::args;
+use crate::command_line;
 
 pub(crate) struct InputPlugin;
 
@@ -27,8 +17,6 @@ impl Plugin for InputPlugin {
     }
 }
 
-/// How the camera flies. `--speed <n>` and `--sensitivity <n>`, because the
-/// only way to know whether a camera feels right is to fly it.
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct Fly {
     pub(crate) speed: f32,
@@ -38,17 +26,16 @@ pub(crate) struct Fly {
 impl Default for Fly {
     fn default() -> Self {
         Fly {
-            speed: args::value("--speed").unwrap_or(MOVE_SPEED),
-            sensitivity: args::value("--sensitivity").unwrap_or(SENSITIVITY),
+            speed: command_line::value("--speed").unwrap_or(MOVE_SPEED),
+            sensitivity: command_line::value("--sensitivity").unwrap_or(SENSITIVITY),
         }
     }
 }
 
 const MOVE_SPEED: f32 = 5.0;
 const SENSITIVITY: f32 = 0.003;
-const PITCH_LIMIT: f32 = 1.55; // just under FRAC_PI_2
+const PITCH_LIMIT: f32 = 1.55;
 
-/// What the game can be asked to do. Devices are somebody else's problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Action {
     Forward,
@@ -57,22 +44,18 @@ pub(crate) enum Action {
     Right,
     Up,
     Down,
-    /// Held while looking around. The rotation itself comes from mouse motion,
-    /// which is an axis, not a button.
+
     Look,
     ToggleDebugView,
     ToggleQuad,
 }
 
-/// One physical control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Binding {
     Key(KeyCode),
     Mouse(MouseButton),
 }
 
-/// Controls to actions, many to one. A flat list, walked once a frame:
-/// ponytail: linear scan, fine at ten bindings. Map it when there are hundreds.
 #[derive(Resource)]
 pub(crate) struct Bindings(pub(crate) Vec<(Binding, Action)>);
 
@@ -94,17 +77,13 @@ impl Default for Bindings {
     }
 }
 
-/// Turns whatever the devices did this frame into action state.
-///
-/// Runs in `PreUpdate` after Bevy's own input collection, so everything in
-/// `Update` sees a state that is already current.
 fn read_bindings(
     mut actions: ResMut<ButtonInput<Action>>,
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
 ) {
-    actions.clear(); // just_pressed / just_released are per-frame
+    actions.clear();
     for &(binding, action) in &bindings.0 {
         let (just_pressed, just_released) = match binding {
             Binding::Key(key) => (keys.just_pressed(key), keys.just_released(key)),
@@ -119,7 +98,6 @@ fn read_bindings(
     }
 }
 
-/// Hold [`Action::Look`] and drag = look. Movement actions fly the camera.
 fn fly_camera(
     camera: Single<&mut Transform, With<Camera3d>>,
     actions: Res<ButtonInput<Action>>,

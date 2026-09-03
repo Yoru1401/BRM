@@ -1,11 +1,6 @@
-//! Rigidbodies against the field.
-//!
-//! Bodies query the same packed shapes the renderer draws, so there is no
-//! separate collision geometry to keep in step.
-
 use bevy::prelude::*;
 
-use crate::args;
+use crate::command_line;
 use crate::sdf::field::{
     Albedo, Brush, Modifiers, SdfScene, SphereBody, scene_distance, scene_normal,
 };
@@ -26,9 +21,6 @@ impl Plugin for PhysicsPlugin {
     }
 }
 
-/// What a body falls through. `--gravity <n>` scales the pull; `--friction <n>`
-/// the grip. Both are feel rather than fact, and feel is answered by playing
-/// with a value, not by picking one.
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct Tuning {
     pub(crate) gravity: Vec3,
@@ -38,60 +30,39 @@ pub(crate) struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
-            gravity: args::value("--gravity").map_or(GRAVITY, |pull| Vec3::new(0.0, -pull, 0.0)),
-            friction: args::value("--friction").unwrap_or(FRICTION_COEFFICIENT),
+            gravity: command_line::value("--gravity")
+                .map_or(GRAVITY, |pull| Vec3::new(0.0, -pull, 0.0)),
+            friction: command_line::value("--friction").unwrap_or(FRICTION_COEFFICIENT),
         }
     }
 }
 
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-/// 0 = no bounce. ponytail: no restitution curve.
+
 const RESTITUTION: f32 = 0.0;
-/// Solid sphere: `I = 2/5 m r^2`.
+
 const SPHERE_INERTIA_FACTOR: f32 = 0.4;
-/// Effective mass along a contact tangent for a solid sphere is `2/7 m`, so
-/// that fraction of the slip is what a perfectly gripping contact removes.
+
 const CONTACT_TANGENT_FACTOR: f32 = 2.0 / 7.0;
-/// Coulomb limit. Friction can never exceed this times the normal impulse,
-/// which is what lets a ball slide on a steep ramp instead of gripping it.
+
 pub(crate) const FRICTION_COEFFICIENT: f32 = 0.6;
-/// Rolling resistance. Nothing else stops a ball rolling forever on flat floor.
+
 const ANGULAR_DAMPING_PER_SECOND: f32 = 0.8;
-/// Below this speed a touching body is parked instead of being integrated, which
-/// is what stops the endless gravity-push-out jitter at rest.
+
 const SLEEP_SPEED: f32 = 0.05;
-/// A body must also be barely spinning before it parks, or a ball would freeze
-/// mid-roll.
+
 const SLEEP_SPIN: f32 = 0.15;
-/// A parked body wakes once the surface under it has moved this far away.
+
 const SLEEP_CLEARANCE: f32 = 0.02;
-/// Bodies get their own colour so they read against the authored world.
+
 const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
-/// A body this far under the world is gone, not falling.
-///
-/// Load-bearing for the *renderer*, not for the physics. A body that misses the
-/// floor never stops accelerating, and `scene_bounds` is one AABB over every
-/// shape - so the scene box grows without limit, and the acceleration grid
-/// derives its resolution from that box. Measured on 2026-09-01: four minutes
-/// of runtime took the bounds to 50270 units tall, collapsed the grid to a
-/// single cell across X and Z, and put the frame at 69 ms against 10 with a
-/// healthy grid.
+
 const KILL_BELOW: f32 = -50.0;
 
-// ----------------------------------------------------------------- simulation
-
-/// The scene asset loads asynchronously and the first frames are spent building
-/// pipelines. Until statics exist the field reads as empty everywhere, so
-/// gravity would run against nothing and drop the bodies through the world.
 fn static_field_is_ready(scene: Res<SdfScene>) -> bool {
     scene.static_count > 0
 }
 
-/// Gravity, integrate, resolve against the static field.
-///
-/// Order matters: push out of the surface first, then kill the velocity heading
-/// into it, then damp what is left sliding along it. Damping the whole velocity
-/// would fight the push-out and leave bodies sinking.
 fn simulate_bodies(
     mut bodies: Query<(&mut SphereBody, &mut Transform)>,
     scene: Res<SdfScene>,
@@ -151,14 +122,6 @@ fn simulate_bodies(
     }
 }
 
-/// Coulomb friction at a contact, returning the change to linear and angular
-/// velocity. Unit mass throughout, matching the pair solver.
-///
-/// Friction acts at the contact point, not the centre, so it both slows the
-/// body and spins it - that coupling is what turns sliding into rolling. The
-/// impulse it would take to kill the slip outright is `2/7` of it for a solid
-/// sphere; Coulomb caps that against the normal impulse, so a steep enough
-/// slope still slides.
 pub(crate) fn contact_friction(
     normal: Vec3,
     velocity: Vec3,
@@ -182,10 +145,6 @@ pub(crate) fn contact_friction(
     (impulse, arm.cross(impulse) / inertia)
 }
 
-/// Half of what it takes to separate two overlapping spheres and stop them
-/// closing. `a` gets these, `b` gets the negatives. `None` when they are apart.
-///
-/// ponytail: equal mass, no restitution, no friction between bodies.
 pub(crate) fn sphere_pair_correction(
     a_position: Vec3,
     a_radius: f32,
@@ -200,8 +159,7 @@ pub(crate) fn sphere_pair_correction(
     if overlap <= 0.0 {
         return None;
     }
-    // Exactly coincident centres have no direction to push along; any axis will
-    // do, and the next step will find a real one.
+
     let away_from_b = offset.try_normalize().unwrap_or(Vec3::Y);
 
     let closing_speed = (a_velocity - b_velocity).dot(away_from_b);
@@ -213,9 +171,6 @@ pub(crate) fn sphere_pair_correction(
     Some((away_from_b * (overlap * 0.5), velocity_change))
 }
 
-/// Keeps bodies out of each other. Every pair, which is fine at this count.
-/// ponytail: O(n^2) and a single pass, so a deep stack stays slightly squashed.
-/// Add a broadphase and a few iterations when either becomes visible.
 fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
     let mut handles: Vec<(Mut<SphereBody>, Mut<Transform>)> = bodies.iter_mut().collect();
 
@@ -240,17 +195,13 @@ fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
             b_placement.translation -= separation;
             a_body.velocity += velocity_change;
             b_body.velocity -= velocity_change;
-            // Something landed on them, so neither is at rest any more.
+
             a_body.resting = false;
             b_body.resting = false;
         }
     }
 }
 
-// ----------------------------------------------------------------- debug draw
-
-/// Three short axis lines per body. A sphere in an SDF looks the same however
-/// it is turned, so without these there is no way to see whether it rolls.
 fn draw_body_spin(mut gizmos: Gizmos, bodies: Query<(&SphereBody, &Transform)>) {
     for (body, placement) in &bodies {
         let reach = body.radius * 1.15;
@@ -269,9 +220,6 @@ fn draw_body_spin(mut gizmos: Gizmos, bodies: Query<(&SphereBody, &Transform)>) 
     }
 }
 
-// ------------------------------------------------------- spawning and removal
-
-/// Bodies that have left the world, removed. See [`KILL_BELOW`].
 pub(crate) fn despawn_fallen_bodies(
     mut commands: Commands,
     fallen: Query<(Entity, &Transform), With<SphereBody>>,
@@ -283,17 +231,7 @@ pub(crate) fn despawn_fallen_bodies(
     }
 }
 
-/// A few spheres dropped above the origin, to watch the field push back.
 fn spawn_bodies(mut commands: Commands) {
-    // Three tests, each aimed at a feature of `world_scene` that exists:
-    // a column into the bowl - the cylinder at (-3, _, 2) with a sphere carved
-    // out of it (do they stack, or sink into each other?), a batch into the
-    // open-ended tube at (0, _, -3) (do they fall through, or jam?), and a
-    // batch onto the funnel at (3, _, -3), whose bore narrows to a slit (they
-    // should perch and wedge rather than pass).
-    //
-    // Anything dropped outside the floor slab - x or z beyond 12 - is caught by
-    // `KILL_BELOW` a few seconds later, so these coordinates have to be right.
     let drops = [
         (Vec3::new(-3.00, 4.0, 2.00), 0.30),
         (Vec3::new(-2.85, 5.5, 2.10), 0.28),
@@ -320,8 +258,6 @@ fn spawn_bodies(mut commands: Commands) {
                 resting: false,
             },
             Brush,
-            // A full round on a uniform box is exactly a sphere of that
-            // radius, which is what the collision maths already assumes.
             Modifiers {
                 round: 1.0,
                 ..default()

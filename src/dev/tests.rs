@@ -5,9 +5,6 @@ mod sdf_tests {
     use crate::sdf::field::*;
     use bevy::prelude::*;
 
-    // ---------------------------------------------------------------- helpers
-
-    /// A brush placed and blended, with default modifiers: a plain box.
     fn placed(placement: Transform, operation: CsgOperation) -> GpuShape {
         pack_brush(
             &GlobalTransform::from(placement),
@@ -17,7 +14,6 @@ mod sdf_tests {
         )
     }
 
-    /// A brush placed and bent, hard-unioned.
     fn shaped(placement: Transform, modifiers: Modifiers) -> GpuShape {
         pack_brush(
             &GlobalTransform::from(placement),
@@ -27,7 +23,6 @@ mod sdf_tests {
         )
     }
 
-    /// The modifier set that makes a solid box a sphere of the scale's radius.
     fn sphere_modifiers() -> Modifiers {
         Modifiers {
             round: 1.0,
@@ -42,8 +37,6 @@ mod sdf_tests {
         }
     }
 
-    /// Mirrors `ray_march` in sdf.wgsl. `omega` of 1.0 is plain sphere tracing;
-    /// `field` is whatever evaluator is under test, exact or gridded.
     fn march(
         field: &dyn Fn(Vec3) -> f32,
         confirm: &dyn Fn(Vec3) -> f32,
@@ -66,8 +59,6 @@ mod sdf_tests {
             let overshot = relaxation > 1.0 && (distance.abs() + previous_distance) < step_length;
             steps += 1;
 
-            // A small distance is not proof of a surface: a grid-clamped field
-            // reports the cell wall, not the geometry. Confirm before stopping.
             if !overshot
                 && distance < threshold
                 && confirm(origin + direction * travelled) < threshold
@@ -86,16 +77,10 @@ mod sdf_tests {
                 break;
             }
         }
-        // Out of budget is a miss. Anything else shades a point in mid-air.
+
         (STOP, steps)
     }
 
-    // -------------------------------------------------------------- authoring
-
-    /// The authored scene has to survive spawning, not just compile. Without a
-    /// `Transform` on the root, propagation never reaches the children and every
-    /// shape packs at the origin, which draws as the whole world stacked in a
-    /// heap and is invisible in any test that only checks one brush.
     #[test]
     fn authored_shapes_land_where_they_were_written() {
         let mut app = App::new();
@@ -132,12 +117,6 @@ mod sdf_tests {
         );
     }
 
-    // ----------------------------------------------- primitives and modifiers
-
-    /// The rounded-box kernel replaced an older combined primitive on
-    /// 2026-09-03, once bevel and taper were the only inputs left that could
-    /// vary. This pins that the two agree everywhere the old one was ever
-    /// called: with its bevel term (`r.z`) at zero, since nothing ever set it.
     #[test]
     fn the_kernel_matches_the_uberprim_it_replaced() {
         let mut seed: u64 = 0x5eed_1234;
@@ -151,9 +130,7 @@ mod sdf_tests {
         for _ in 0..5000 {
             let half = Vec3::new(0.2 + next() * 2.0, 0.2 + next() * 2.0, 0.2 + next() * 2.0);
             let footprint = half.x.min(half.z);
-            // The arguments the uber-primitive was fed: `s.w` a wall no thicker
-            // than the footprint, `r.x`/`r.y` corner radii inside the shape,
-            // `r.z` fixed at zero.
+
             let wall = next() * footprint;
             let side = next() * footprint;
             let cap = next() * half.y;
@@ -175,9 +152,6 @@ mod sdf_tests {
         }
     }
 
-    /// A full round on a uniform box has to be an exact sphere, not merely a
-    /// round-looking thing: it is the only sphere the field has, the bodies are
-    /// drawn with it, and the collision maths assumes a true radius.
     #[test]
     fn a_fully_rounded_box_is_an_exact_sphere() {
         let scene = [shaped(Transform::IDENTITY, sphere_modifiers())];
@@ -197,8 +171,6 @@ mod sdf_tests {
         assert!((scene_distance(&scene, Vec3::ZERO) + 1.0).abs() < 1e-5);
     }
 
-    /// A full bevel is the field's only cylinder, and it has to be exact for
-    /// the same reason: nothing else can draw one.
     #[test]
     fn a_fully_bevelled_box_is_an_exact_cylinder() {
         let scene = [shaped(
@@ -208,15 +180,14 @@ mod sdf_tests {
                 ..default()
             },
         )];
-        // Straight out from the curved side.
+
         assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
-        // Straight out from a flat cap, along the axis.
+
         assert!((scene_distance(&scene, Vec3::new(0.0, 3.0, 0.0)) - 2.0).abs() < 1e-5);
-        // Past the rim, so both offsets count.
+
         let rim = scene_distance(&scene, Vec3::new(2.0, 2.0, 0.0));
         assert!((rim - 2f32.sqrt()).abs() < 1e-5);
-        // Diagonally out in the round plane: the radius is 1 in every
-        // direction, which a box would fail.
+
         let across = scene_distance(&scene, Vec3::new(2.0, 0.0, 2.0));
         assert!((across - (8f32.sqrt() - 1.0)).abs() < 1e-5);
     }
@@ -224,12 +195,12 @@ mod sdf_tests {
     #[test]
     fn box_matches_closed_form_outside_face_edge_and_inside() {
         let scene = [placed(Transform::IDENTITY, union(0.0))];
-        // Straight out from a face.
+
         assert!((scene_distance(&scene, Vec3::new(3.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
-        // Diagonally past an edge: sqrt(2) from the corner of the cross section.
+
         let diagonal = scene_distance(&scene, Vec3::new(2.0, 2.0, 0.0));
         assert!((diagonal - 2f32.sqrt()).abs() < 1e-5);
-        // Dead centre is one half-extent inside.
+
         assert!((scene_distance(&scene, Vec3::ZERO) + 1.0).abs() < 1e-5);
     }
 
@@ -239,22 +210,17 @@ mod sdf_tests {
             Transform::from_scale(Vec3::splat(2.0)),
             sphere_modifiers(),
         )];
-        // Radius becomes 2, so a point 5 out is 3 away.
+
         assert!((scene_distance(&scene, Vec3::new(5.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
     }
 
-    /// The modifiers are not operations layered on a box - they are arguments
-    /// that reshape it, and they interact. These are the corners of that
-    /// parameter space.
     #[test]
     fn the_modifiers_reach_every_shape_the_field_needs() {
         let unit_box = |modifiers| shaped(Transform::IDENTITY, modifiers);
 
-        // Untouched, it is an ordinary unit box.
         let plain = unit_box(Modifiers::default());
         assert!((shape_distance(&plain, Vec3::new(2.0, 0.0, 0.0)) - 1.0).abs() < 1e-4);
 
-        // Full round works on every edge at once, so a cube becomes a sphere.
         let ball = unit_box(Modifiers {
             round: 1.0,
             ..default()
@@ -271,7 +237,6 @@ mod sdf_tests {
             );
         }
 
-        // Full bevel rounds only the four vertical edges: a cylinder.
         let bevelled = unit_box(Modifiers {
             bevel: 1.0,
             ..default()
@@ -281,11 +246,9 @@ mod sdf_tests {
             (corner - (4.5f32.sqrt() - 1.0)).abs() < 1e-4,
             "got {corner}"
         );
-        // The caps stay flat, so straight up is still one unit of box.
+
         assert!((shape_distance(&bevelled, Vec3::new(0.0, 2.0, 0.0)) - 1.0).abs() < 1e-4);
 
-        // Full taper closes the top to a point while the base stays put - the
-        // pack pre-shrinks the half sizes exactly so this holds.
         let tapered = unit_box(Modifiers {
             cone: 1.0,
             ..default()
@@ -293,17 +256,13 @@ mod sdf_tests {
         assert!(shape_distance(&tapered, Vec3::new(0.0, 1.0, 0.0)).abs() < 1e-3);
         assert!(shape_distance(&tapered, Vec3::new(1.0, -1.0, 0.0)).abs() < 1e-3);
         assert!(shape_distance(&tapered, Vec3::new(0.8, 0.5, 0.0)) > 0.0);
-        // The base stays a square with sharp corners. This is the whole reason
-        // the taper scales the cross-section rather than using the uber
-        // primitive's own, which would round them off.
+
         let base_corner = shape_distance(&tapered, Vec3::new(1.0, -1.0, 1.0));
         assert!(
             base_corner.abs() < 1e-3,
             "base corner should be sharp, got {base_corner}"
         );
 
-        // The taper takes the same amount off every side, so a slab three times
-        // as long tapers to a ridge, not to a smaller slab of the same shape.
         let ridge = shaped(
             Transform::from_scale(Vec3::new(3.0, 1.0, 1.0)),
             Modifiers {
@@ -311,17 +270,12 @@ mod sdf_tests {
                 ..default()
             },
         );
-        // Half sizes are (3, 1, 1), so the top loses 1 from every side and ends
-        // as a line running along x from -2 to 2.
+
         assert!(shape_distance(&ridge, Vec3::new(2.0, 1.0, 0.0)).abs() < 1e-3);
         assert!(shape_distance(&ridge, Vec3::new(2.4, 1.0, 0.0)) > 0.0);
-        // Just below the top it is still 2 wide in x. Scaling the footprint
-        // instead would have kept the 3:1 ratio and left barely anything there,
-        // so this is the assertion that tells the two apart.
+
         assert!(shape_distance(&ridge, Vec3::new(1.0, 0.9, 0.0)) < 0.0);
 
-        // Taper and corner radius compete for the same footprint. Asking for
-        // both at once has to clamp, not collapse the shape.
         let both = unit_box(Modifiers {
             cone: 1.0,
             bevel: 1.0,
@@ -330,9 +284,6 @@ mod sdf_tests {
         assert!(shape_distance(&both, Vec3::new(0.0, 1.0, 0.0)).abs() < 1e-3);
         assert!(shape_distance(&both, Vec3::new(1.0, -1.0, 0.0)).abs() < 1e-3);
 
-        // Thickness below 1 hollows it out without moving the outer surface.
-        // Half strength leaves a hole exactly half the shape's width: on a unit
-        // cube the wall runs from 0.5 out to 1.0.
         let hollow = unit_box(Modifiers {
             thickness: 0.5,
             ..default()
@@ -342,13 +293,10 @@ mod sdf_tests {
         assert!(shape_distance(&hollow, Vec3::new(0.5, 0.0, 0.0)).abs() < 1e-3);
         assert!(shape_distance(&hollow, Vec3::new(0.75, 0.0, 0.0)) < 0.0);
         assert!(shape_distance(&hollow, Vec3::new(0.25, 0.0, 0.0)) > 0.0);
-        // The bore runs straight through: open at both ends, no floor. A
-        // closed shell would be invisible from outside anyway.
+
         assert!(shape_distance(&hollow, Vec3::new(0.0, 0.99, 0.0)) > 0.0);
         assert!(shape_distance(&hollow, Vec3::new(0.0, -0.99, 0.0)) > 0.0);
 
-        // A thin plate becomes a frame: the bore goes through its height and
-        // its wall is measured against the footprint, not the thickness.
         let plate = shaped(
             Transform::from_scale(Vec3::new(1.0, 0.1, 1.0)),
             Modifiers {
@@ -359,8 +307,6 @@ mod sdf_tests {
         assert!(shape_distance(&plate, Vec3::ZERO) > 0.0);
         assert!(shape_distance(&plate, Vec3::new(0.75, 0.0, 0.0)) < 0.0);
 
-        // Thickness 0 is the thinnest wall the shape can have, not a solid one.
-        // The two used to collide, because solid was encoded as a zero wall.
         let paper = unit_box(Modifiers {
             thickness: 0.0,
             ..default()
@@ -368,8 +314,6 @@ mod sdf_tests {
         assert!(shape_distance(&paper, Vec3::ZERO) > 0.0);
         assert!(shape_distance(&paper, Vec3::new(0.99, 0.0, 0.0)).abs() < 0.02);
 
-        // Tapered, a shell is a funnel: the bore is a slit at the narrow end
-        // and closes off entirely towards the wide one, so the base is solid.
         let funnel = unit_box(Modifiers {
             cone: 0.5,
             thickness: 0.3,
@@ -379,14 +323,10 @@ mod sdf_tests {
         assert!(shape_distance(&funnel, Vec3::new(0.0, 0.95, 0.0)) > 0.0);
     }
 
-    // ------------------------------------------------------------ blend modes
-
-    /// The modes past add/subtract/intersect are each a different arrangement
-    /// of the same three. Paint is the one that must not touch the field at all.
     #[test]
     fn blend_modes_are_arrangements_of_the_three_booleans() {
         let mode = |mode| CsgOperation { mode, ..default() };
-        // Deep inside the field, and inside the incoming shape too.
+
         let field = -1.0;
         let shape = -0.5;
 
@@ -395,12 +335,12 @@ mod sdf_tests {
             blend(shape, field, &pack(mode(GPU_MODE_INTERSECT)), false),
             shape
         );
-        // Subtracting carves it back out, so the point ends up outside.
+
         assert_eq!(
             blend(shape, field, &pack(mode(GPU_MODE_SUBTRACT)), false),
             0.5
         );
-        // Paint only recolours.
+
         assert_eq!(
             blend(shape, field, &pack(mode(GPU_MODE_PAINT)), false),
             field
@@ -416,17 +356,13 @@ mod sdf_tests {
         }
     }
 
-    // ------------------------------------------------------ distance, exactly
-
     #[test]
     fn rotation_is_applied_in_the_shapes_own_frame() {
         let scene = [placed(
             Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
             union(0.0),
         )];
-        // Turning the cube 45 degrees points a vertical edge at +X. The sample
-        // lands at (sqrt(2), 0, sqrt(2)) in the cube's frame, so two axes are
-        // each sqrt(2) - 1 outside.
+
         let expected = ((2f32.sqrt() - 1.0).powi(2) * 2.0).sqrt();
         let measured = scene_distance(&scene, Vec3::new(2.0, 0.0, 0.0));
         assert!(
@@ -441,14 +377,10 @@ mod sdf_tests {
             Transform::from_scale(Vec3::new(4.0, 1.0, 1.0)),
             union(0.0),
         )];
-        // Half extents become (4, 1, 1), so a point 6 out along X is exactly 2
-        // away. The old smallest-axis correction under-reported this as 0.5.
+
         assert!((scene_distance(&scene, Vec3::new(6.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
     }
 
-    /// A full bevel makes a non-uniform box a cylinder whose radius and height
-    /// scale independently, and it stays exact on the side, the cap and the
-    /// rim between them.
     #[test]
     fn a_bevelled_box_is_a_cylinder_exact_on_side_cap_and_corner() {
         let cylinder = |scale| {
@@ -462,27 +394,23 @@ mod sdf_tests {
         };
 
         let scene = [cylinder(Vec3::new(1.0, 2.0, 1.0))];
-        // Straight out from the curved side.
+
         assert!((scene_distance(&scene, Vec3::new(4.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
-        // Straight out from a flat cap, along the axis.
+
         assert!((scene_distance(&scene, Vec3::new(0.0, 5.0, 0.0)) - 3.0).abs() < 1e-5);
-        // Past the rim, so both offsets count.
+
         let corner = scene_distance(&scene, Vec3::new(2.0, 3.0, 0.0));
         assert!((corner - 2f32.sqrt()).abs() < 1e-5);
-        // Inside, nearest wall is the curved one.
+
         assert!((scene_distance(&scene, Vec3::ZERO) + 1.0).abs() < 1e-5);
 
-        // Radius and half-height take the footprint and the height separately.
         let tall = [cylinder(Vec3::new(2.0, 3.0, 2.0))];
         assert!((scene_distance(&tall, Vec3::new(5.0, 0.0, 0.0)) - 3.0).abs() < 1e-5);
         assert!((scene_distance(&tall, Vec3::new(0.0, 7.0, 0.0)) - 4.0).abs() < 1e-5);
     }
 
-    // ---------------------------------------------------------------- physics
-
     #[test]
     fn sliding_turns_into_spin() {
-        // Sliding along +X on a floor whose normal is +Y, no spin yet.
         let (velocity_change, spin_change) = contact_friction(
             Vec3::Y,
             Vec3::X,
@@ -491,15 +419,14 @@ mod sdf_tests {
             10.0,
             FRICTION_COEFFICIENT,
         );
-        // Friction opposes the slide...
+
         assert!(velocity_change.x < 0.0);
-        // ...and torques the ball forward, which is -Z for +X travel on +Y up.
+
         assert!(spin_change.z < 0.0);
     }
 
     #[test]
     fn rolling_without_slipping_is_left_alone() {
-        // Contact point stationary: v + w x arm == 0, so there is no slip.
         let radius = 0.5;
         let velocity = Vec3::X;
         let spin = Vec3::new(0.0, 0.0, -velocity.x / radius);
@@ -511,7 +438,6 @@ mod sdf_tests {
 
     #[test]
     fn coulomb_caps_friction_on_a_weak_contact() {
-        // Barely resting on the surface, so friction cannot kill a fast slide.
         let (gentle, _) = contact_friction(
             Vec3::Y,
             Vec3::X * 10.0,
@@ -550,9 +476,8 @@ mod sdf_tests {
         )
         .expect("these overlap by 0.5");
 
-        // Half the overlap each, pushed apart along the line of centres.
         assert!((separation - Vec3::new(-0.25, 0.0, 0.0)).length() < 1e-5);
-        // Closing at 2 along that line, so each sheds half of it.
+
         assert!((velocity_change - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
     }
 
@@ -569,8 +494,6 @@ mod sdf_tests {
         .expect("these overlap");
         assert_eq!(velocity_change, Vec3::ZERO);
     }
-
-    // ------------------------------------------------------ blending, marched
 
     #[test]
     fn hard_union_is_the_nearer_of_the_two() {
@@ -592,7 +515,7 @@ mod sdf_tests {
             hard[0].clone(),
             placed(Transform::from_xyz(apart, 0.0, 0.0), union(0.5)),
         ];
-        // Beside the seam, the blended field must report the surface as nearer.
+
         let probe = Vec3::new(apart * 0.5, 1.2, 0.0);
         assert!(scene_distance(&blended, probe) < scene_distance(&hard, probe));
     }
@@ -609,18 +532,15 @@ mod sdf_tests {
                 },
             ),
         ];
-        // The centre is now hollow, so the origin sits outside the solid.
+
         assert!(scene_distance(&scene, Vec3::ZERO) > 0.0);
-        // A point in the remaining shell is still inside.
+
         assert!(scene_distance(&scene, Vec3::new(1.5, 0.0, 0.0)) < 0.0);
     }
-    // ----------------------------------------------------------- the arguments
 
-    /// A flag reader is trivial until it is wrong, and then every tuned value
-    /// silently reads its default. Each case here is one way that happens.
     #[test]
     fn a_flag_reads_the_number_after_it_and_nothing_else() {
-        use crate::args::value_in;
+        use crate::command_line::value_in;
 
         let line: Vec<String> = ["idk", "bench", "spread:80", "--omega", "1.0", "--no-grid"]
             .iter()
@@ -628,30 +548,23 @@ mod sdf_tests {
             .collect();
 
         assert_eq!(value_in(&line, "--omega"), Some(1.0));
-        // Absent is not zero. `unwrap_or(DEFAULT)` at every call site depends on
-        // this, and a zero omega would be a march that never advances.
+
         assert_eq!(value_in(&line, "--grid"), None);
-        // Present but followed by another flag, not a number.
+
         assert_eq!(value_in(&line, "--no-grid"), None);
-        // Present as the last word, with nothing after it at all.
+
         let trailing = vec!["idk".to_string(), "--speed".to_string()];
         assert_eq!(value_in(&trailing, "--speed"), None);
-        // A prefix of a real flag is not that flag.
+
         assert_eq!(value_in(&line, "--omeg"), None);
     }
 
-    // ------------------------------------------------------------------ input
-
-    /// A binding has to survive the whole press-hold-release cycle: the frame
-    /// after a press is a *held* frame, not a second press, and that is exactly
-    /// what a toggle bound to it depends on.
     #[test]
     fn a_bound_key_drives_its_action_for_one_press_only() {
         use crate::game::input::{Action, InputPlugin};
 
         let mut app = App::new();
-        // Bevy's own InputPlugin would clear the keyboard state this test sets
-        // by hand, so drive the raw resources directly instead.
+
         app.add_plugins((MinimalPlugins, InputPlugin))
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>();
@@ -666,7 +579,7 @@ mod sdf_tests {
 
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
-            .clear(); // the key is down, but this frame is not a fresh press
+            .clear();
         app.update();
         let actions = app.world().resource::<ButtonInput<Action>>();
         assert!(!actions.just_pressed(Action::Forward));
@@ -680,13 +593,7 @@ mod sdf_tests {
         assert!(actions.just_released(Action::Forward));
         assert!(!actions.pressed(Action::Forward));
     }
-    // ---------------------------------------------------------------- culling
 
-    /// Culling is only allowed to save work, never to change the answer. The
-    /// reference loop here blends every shape unconditionally; the real
-    /// `scene_distance` skips the ones its box test rejects. They must agree
-    /// **exactly** - a skipped ADD contributes nothing at all to `min` or to
-    /// `union_smooth`, so this is bit-for-bit, not approximate.
     #[test]
     fn box_culling_never_changes_the_field() {
         fn uncalled(shapes: &[GpuShape], point: Vec3) -> f32 {
@@ -702,14 +609,12 @@ mod sdf_tests {
             field
         }
 
-        // A cheap deterministic generator beats a dependency, and a fixed seed
-        // means a failure is reproducible.
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            (state >> 40) as f32 / 16777216.0 // [0, 1)
+            (state >> 40) as f32 / 16777216.0
         };
         macro_rules! spread {
             ($scale:expr) => {
@@ -741,8 +646,7 @@ mod sdf_tests {
                         thickness: next(),
                         cone: next(),
                     };
-                    // Every mode, so the modes that must never be culled are
-                    // exercised as hard as ADD is.
+
                     let operation = CsgOperation {
                         mode: (next() * 9.0) as u32,
                         chamfer: next() < 0.5,
@@ -769,9 +673,7 @@ mod sdf_tests {
             }
         }
     }
-    /// The parity test above passes trivially if nothing is ever culled, so
-    /// pin the predicate down directly: it must fire on a distant ADD, and must
-    /// never fire on a mode whose formula has not been proven safe.
+
     #[test]
     fn the_cull_fires_on_a_distant_add_and_never_on_another_mode() {
         let far = Vec3::new(30.0, 0.0, 0.0);
@@ -779,7 +681,7 @@ mod sdf_tests {
 
         let added = placed(Transform::IDENTITY, union(0.0));
         assert!(shape_cannot_reach(&added, far, near_field));
-        // Close enough to matter: the box is nearer than the field.
+
         assert!(!shape_cannot_reach(
             &added,
             Vec3::new(1.2, 0.0, 0.0),
@@ -804,10 +706,6 @@ mod sdf_tests {
         }
     }
 
-    /// The cull bound has to survive the one shape whose estimate is not exact:
-    /// a taper, which divides the whole distance down to stay conservative on
-    /// its sloped face. Sampling around it is where an un-inflated box bound
-    /// would overshoot.
     #[test]
     fn the_cull_bound_holds_under_a_taper() {
         let shape = shaped(
@@ -817,8 +715,7 @@ mod sdf_tests {
                 ..default()
             },
         );
-        // The bound is a lower bound only outside the surface; a cull box
-        // reports zero rather than a negative depth inside one.
+
         let mut checked = 0;
         for step in 1..200 {
             let point = Vec3::new(3.0 + step as f32 * 0.03, step as f32 * 0.04 - 3.0, -0.2);
@@ -836,15 +733,10 @@ mod sdf_tests {
         }
         assert!(checked > 50, "only {checked} points were outside the taper");
     }
-    // ----------------------------------------------------------- bench scenes
 
-    /// A count sweep only means something if the scenes cover the same pixels.
-    /// Every brush must stay inside the slab, and the slab the scene fills must
-    /// not grow with the count - which is exactly what the last measurement
-    /// round got wrong.
     #[test]
     fn every_bench_count_fills_the_same_slab() {
-        use crate::dev::bench::{SLAB_HALF_SIZE, cells_per_axis, grid_layout};
+        use crate::dev::benchmark::{SLAB_HALF_SIZE, cells_per_axis, grid_layout};
 
         for count in [1, 8, 20, 27, 64, 80, 125] {
             let layout = grid_layout(count);
@@ -860,8 +752,6 @@ mod sdf_tests {
                 );
             }
 
-            // Full rows reach both ends, so the footprint is the slab itself
-            // and not something that creeps outwards with the count.
             let widest = layout
                 .iter()
                 .map(|placement| placement.translation.x + cell.x)
@@ -872,12 +762,10 @@ mod sdf_tests {
             );
         }
     }
-    /// The spread scene only measures what it claims to if its boxes stay
-    /// apart: two that touch merge into one blended surface, which is one
-    /// reject instead of two and a different shape to evaluate.
+
     #[test]
     fn spread_boxes_never_touch() {
-        use crate::dev::bench::{SPREAD_HALF_SIZE, spread_layout};
+        use crate::dev::benchmark::{SPREAD_HALF_SIZE, spread_layout};
 
         for count in [8, 20, 80, 125, 256] {
             let layout = spread_layout(count);
@@ -891,7 +779,6 @@ mod sdf_tests {
                 );
             }
 
-            // ponytail: O(n^2) over at most a few hundred boxes, in a test.
             for (index, one) in layout.iter().enumerate() {
                 for other in &layout[index + 1..] {
                     let gap = (one.translation - other.translation).abs() - one.scale - other.scale;
@@ -905,15 +792,7 @@ mod sdf_tests {
             }
         }
     }
-    // --------------------------------------------------------------- marching
 
-    /// Over-relaxation is only allowed to make the march *cheaper*, never to
-    /// let it miss something. This mirrors `ray_march` in sdf.wgsl on the CPU
-    /// (the shader cannot be run here) and compares a relaxed march against a
-    /// plain one over random scenes and random rays.
-    ///
-    /// The failure that matters is one-sided: a relaxed march reporting a hit
-    /// **further along the ray** than the plain one means a surface was jumped.
     #[test]
     fn over_relaxation_never_marches_past_a_surface() {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
@@ -934,11 +813,6 @@ mod sdf_tests {
         let mut compared = 0u32;
 
         for _ in 0..60 {
-            // Unions only. Subtract and intersect are `max`-based, and a max of
-            // two bounds can *overestimate* near the seam - which breaks the
-            // Lipschitz condition over-relaxation rests on, for plain tracing
-            // too. Those seams are a known hazard, not something this test can
-            // paper over.
             let shapes: Vec<GpuShape> = (0..2 + (next() * 6.0) as usize)
                 .map(|_| {
                     let placement = Transform {
@@ -974,7 +848,7 @@ mod sdf_tests {
                     - origin.normalize_or_zero() * 0.0)
                     .normalize_or_zero();
                 if direction == Vec3::ZERO || scene_distance(&shapes, origin) < 0.0 {
-                    continue; // starting inside is its own case, handled by the sign test
+                    continue;
                 }
 
                 let evaluate = |point| scene_distance(&shapes, point);
@@ -983,8 +857,6 @@ mod sdf_tests {
                 let (relaxed, relaxed_cost) =
                     march(&evaluate, &evaluate, origin, direction, 1.2, 0.001, 512);
 
-                // Half a per-step threshold of slack: the two marches stop at
-                // slightly different points on the same surface.
                 assert!(
                     relaxed <= plain + 0.05,
                     "relaxed march ran {relaxed} past the plain hit at {plain}"
@@ -997,22 +869,13 @@ mod sdf_tests {
 
         println!("plain {plain_steps} steps, relaxed {relaxed_steps} over {compared} rays");
         assert!(compared > 500, "only {compared} rays actually ran");
-        // The whole point is fewer steps. If relaxation costs more than plain
-        // tracing on random scenes, the fallback is thrashing.
+
         assert!(
             relaxed_steps < plain_steps,
             "relaxed spent {relaxed_steps} steps against plain's {plain_steps}"
         );
     }
-    // --------------------------------------------------------------- the grid
 
-    /// The grid is allowed to be pessimistic and must never be optimistic. A
-    /// cell only knows its own shapes, so if it ever reports a *larger*
-    /// distance than the exact field, a march using it steps through geometry.
-    ///
-    /// Every mode is in the scenes, including the ones that read the field
-    /// globally - those must end up in every cell, and this is what catches it
-    /// if they do not.
     #[test]
     fn the_grid_never_reports_more_than_the_exact_field() {
         use crate::sdf::field::{build_grid, scene_bounds, scene_distance_gridded};
@@ -1079,9 +942,7 @@ mod sdf_tests {
             }
         }
     }
-    /// Soundness says the grid cannot report too much; this says the march that
-    /// uses it lands in the same place. A grid that is merely conservative
-    /// still has to draw the same picture.
+
     #[test]
     fn a_gridded_march_hits_what_the_exact_one_hits() {
         use crate::sdf::field::{build_grid, scene_bounds, scene_distance_gridded};
@@ -1146,11 +1007,6 @@ mod sdf_tests {
                     continue;
                 }
 
-                // A fat threshold on purpose. The grid clamps to the cell
-                // wall, and the wall margin is small - so with a hit test loose
-                // enough to mistake the margin for geometry, an unconfirmed
-                // gridded march stops in mid-air. This is the shader's own
-                // situation: its threshold grows with distance.
                 let (hit, cost) = march(&exact, &exact, origin, direction, 1.2, 0.05, 512);
                 let (grid_hit, grid_cost) =
                     march(&gridded, &exact, origin, direction, 1.2, 0.05, 512);
@@ -1167,20 +1023,7 @@ mod sdf_tests {
         assert!(compared > 300, "only {compared} rays actually ran");
         println!("exact {exact_steps} steps, gridded {grid_steps} over {compared} rays");
     }
-    /// Two faults that only show on a long ray *inside* the grid: cells that
-    /// are not cubic, and cells that do not overlap.
-    ///
-    /// A flat world divided by the same count on every axis gives pancake
-    /// cells, and the thinnest axis then sets the step length for every ray -
-    /// on the bench scene that was 0.053 units at a time. A ray running along a
-    /// cell wall crawls for a different reason. Either way it runs out of
-    /// budget and draws as background: a slice of the world missing down the
-    /// middle of the screen, which is what it did.
-    ///
-    /// The ray is aimed **straight down a cell plane at a target it must
-    /// reach**. Two earlier versions of this test let the ray miss, and a miss
-    /// agrees with a miss - they passed against both faults and measured
-    /// nothing.
+
     #[test]
     fn a_long_ray_inside_the_grid_still_arrives() {
         use crate::sdf::field::{build_grid, scene_bounds, scene_distance_gridded};
@@ -1196,8 +1039,7 @@ mod sdf_tests {
                 Modifiers::default(),
             )
         };
-        // Wide and flat, like a level. The anchors alone fix the bounds, so the
-        // cell planes do not move when the target is added.
+
         let anchors = [
             cube_at(Vec3::new(-20.0, 0.0, -20.0)),
             cube_at(Vec3::new(20.0, 0.0, 20.0)),
@@ -1228,7 +1070,6 @@ mod sdf_tests {
                     SHADER_BUDGET,
                 );
 
-                // Non-vacuous: the exact march has to actually reach the target.
                 assert!(hit < 40.0, "the exact march missed its own target at x {x}");
                 assert!(
                     (hit - grid_hit).abs() < 0.1,
@@ -1238,12 +1079,6 @@ mod sdf_tests {
         }
     }
 
-    // ----------------------------------------------------------------- lights
-
-    /// The spot cone is compared as cosines, and cosine runs backwards: the
-    /// inner angle has the *larger* cosine. `smoothstep(cos_outer, cos_inner,
-    /// alignment)` is only a falloff if that ordering holds, and it silently
-    /// inverts the cone if it does not.
     #[test]
     fn a_spot_packs_a_cone_that_fades_outwards() {
         use crate::sdf::light::{Light, LightKind};
@@ -1265,15 +1100,13 @@ mod sdf_tests {
             packed.cos_inner,
             packed.cos_outer
         );
-        // -Z is forward, so a light above the origin looking at it points down.
+
         assert!(
             packed.direction.dot(Vec3::NEG_Y) > 0.99,
             "expected it to point down, got {:?}",
             packed.direction
         );
 
-        // An outer angle inside the inner one would make the falloff run the
-        // wrong way; it is pushed back out instead.
         let inverted = Light {
             kind: LightKind::Spot {
                 inner: 0.5,
@@ -1284,18 +1117,7 @@ mod sdf_tests {
         .to_gpu(&GlobalTransform::IDENTITY);
         assert!(inverted.cos_inner > inverted.cos_outer);
     }
-    /// The soft-shadow ratio needs a **true** distance, and the grid does not
-    /// return one.
-    ///
-    /// `scene_distance_gridded` clamps its answer to the wall of the cell it
-    /// landed in. That is sound for stepping - a ray never steps through
-    /// anything - but Quilez's penumbra reads the same number as "an occluder
-    /// is this close" and darkens for it. Cell walls are a cubic lattice, so
-    /// the darkening is one too: square shadows, whatever shape cast them.
-    ///
-    /// The ray is aimed to miss by a wide margin and the exact field is
-    /// required to call it lit, so the test cannot pass by both sides going
-    /// dark together.
+
     #[test]
     fn the_soft_shadow_ratio_is_not_darkened_by_the_grid() {
         use crate::sdf::field::{build_grid, scene_bounds, scene_distance_gridded};
@@ -1304,7 +1126,6 @@ mod sdf_tests {
         const BIAS: f32 = 0.02;
         const STEPS: u32 = 48;
 
-        // Mirrors `shadow_factor` in sdf.wgsl.
         let penumbra = |field: &dyn Fn(Vec3) -> f32, origin: Vec3, direction: Vec3, far: f32| {
             let mut shade = 1.0f32;
             let mut travelled = BIAS;
@@ -1339,8 +1160,6 @@ mod sdf_tests {
         let exact = |point| scene_distance(&shapes, point);
         let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
 
-        // Straight up from open air above the floor, well clear of the
-        // sphere. Nothing is in the way of any of these.
         let sun = Vec3::Y;
         let mut checked = 0;
         let mut worst: f32 = 0.0;
@@ -1359,10 +1178,6 @@ mod sdf_tests {
 
         assert!(checked == 24);
 
-        // The one that matters. A sun low in the sky sends its shadow rays
-        // *along* the level rather than out of it, so they stay inside the grid
-        // for their whole length - and a flat level gives cells that are thin
-        // in y, so the wall is a fraction of a unit away at every step.
         let grazing = Vec3::new(1.0, 0.25, 0.0).normalize();
         for step in 0..12 {
             let along = -9.0 + step as f32 * 0.5;
@@ -1381,16 +1196,7 @@ mod sdf_tests {
             "the grid darkened an unoccluded ray by {worst} over {checked} rays;              the penumbra is reading cell walls as geometry"
         );
     }
-    /// The shadow march reads a proxy built from cull boxes, never the field.
-    /// Two things have to hold at once, and each alone is trivially satisfiable
-    /// by a broken proxy.
-    ///
-    /// **It bounds the field from below**, so a shadow ray can only stop early
-    /// - too much shadow, never a ray that walks through a caster. A proxy that
-    /// returned zero everywhere would pass this.
-    ///
-    /// **It still lets light through** where the field does. A proxy that
-    /// returned `MAX_MARCH_DISTANCE` everywhere would pass that.
+
     #[test]
     fn the_shadow_proxy_bounds_the_field_and_still_lets_light_through() {
         use crate::sdf::field::{
@@ -1401,7 +1207,6 @@ mod sdf_tests {
         const BIAS: f32 = 0.02;
         const STEPS: u32 = 48;
 
-        // Mirrors `shadow_factor` in sdf.wgsl.
         let penumbra = |field: &dyn Fn(Vec3) -> f32, origin: Vec3, direction: Vec3, far: f32| {
             let mut shade = 1.0f32;
             let mut travelled = BIAS;
@@ -1429,10 +1234,6 @@ mod sdf_tests {
                 Modifiers::default(),
             ),
             shaped(Transform::from_xyz(0.0, 1.5, 0.0), sphere_modifiers()),
-            // Turned and rounded, so the bound has to be built in the shape's
-            // own frame and has to survive a modifier eating into the box it
-            // is measured against. An axis-aligned bound was one of the two
-            // things wrong with the first version of this proxy.
             shaped(
                 Transform {
                     translation: Vec3::new(-5.0, 1.0, 3.0),
@@ -1444,8 +1245,6 @@ mod sdf_tests {
                     ..default()
                 },
             ),
-            // Tapered, so the proxy - which drops the taper - substitutes the
-            // untapered box and is strictly looser than the shape near the top.
             shaped(
                 Transform {
                     translation: Vec3::new(5.0, 1.2, -2.0),
@@ -1464,15 +1263,6 @@ mod sdf_tests {
         let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
         let proxy = |point| shadow_proxy_distance(&shapes, &grid, point);
 
-        // Below the field wherever the field is outside a surface, sampled over
-        // the whole scene box rather than along one ray - a bound that only
-        // holds on the path a shadow happens to take is not a bound.
-        //
-        // Inside a solid the proxy sits *above* the field: a cull box reports
-        // zero, never a negative depth. Out of scope on purpose. A shadow ray
-        // starts at `surface_point + normal * SHADOW_BIAS` and stops the moment
-        // the field reads under the surface threshold, so it never travels
-        // through the inside of anything.
         let (mut outside, mut inside, mut loose) = (0, 0, 0);
         for xi in 0..13 {
             for yi in 0..13 {
@@ -1496,29 +1286,23 @@ mod sdf_tests {
                 }
             }
         }
-        // Or the bound above was never actually put to work.
+
         assert!(
             outside > inside,
             "only {outside} of {} sample points were outside the geometry",
             outside + inside
         );
-        // And somewhere it has to be a real bound rather than a copy of the
-        // field, or `<=` is being satisfied by equality and proves nothing
-        // about the shapes the proxy substitutes.
+
         assert!(
             loose > 0,
             "the proxy equalled the field at every one of {outside} points"
         );
 
-        // Under the sphere, looking at the sun. Occluded by the field, and the
-        // proxy has to agree or the shadow is simply missing.
         let sun = Vec3::Y;
         let beneath = Vec3::new(0.0, 0.3, 0.0);
         assert_eq!(penumbra(&gridded, beneath, sun, 40.0), 0.0);
         assert_eq!(penumbra(&proxy, beneath, sun, 40.0), 0.0);
 
-        // Out from under it, and still on the floor. The field calls these lit;
-        // the proxy has to leave most of the light, or the level goes black.
         let mut checked = 0;
         for step in 0..12 {
             let across = 4.0 + step as f32 * 0.5;
@@ -1535,14 +1319,6 @@ mod sdf_tests {
         assert_eq!(checked, 12);
     }
 
-    // ----------------------------------------------- bodies leaving the world
-
-    /// A body that misses the floor must be removed, not left falling.
-    ///
-    /// The renderer is what breaks otherwise: `scene_bounds` is one AABB over
-    /// every shape, so a body accelerating downward forever drags the scene box
-    /// with it and the acceleration grid - whose resolution comes from that box
-    /// - collapses to a single cell across the level.
     #[test]
     fn a_body_that_leaves_the_world_is_removed() {
         let mut app = App::new();
@@ -1562,7 +1338,7 @@ mod sdf_tests {
         };
         let resting = app.world_mut().spawn(body(1.0)).id();
         let falling = app.world_mut().spawn(body(-1000.0)).id();
-        // Far down, but still inside the world: a deep pit is not a fall.
+
         let deep = app.world_mut().spawn(body(-10.0)).id();
 
         app.update();

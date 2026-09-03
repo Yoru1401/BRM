@@ -1,9 +1,3 @@
-//! The screen-space stats overlay.
-//!
-//! Everything in the world itself is the signed distance field. This module
-//! draws the one thing that is not: a text readout of what the renderer is
-//! doing, in screen space, over the top.
-
 use bevy::{
     diagnostic::{DiagnosticPath, DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
@@ -14,14 +8,12 @@ use core::time::Duration;
 use crate::sdf::field::{SdfScene, scene_distance};
 use crate::sdf::render::{Quad, SdfMaterial};
 
-pub(crate) struct UiPlugin;
+pub(crate) struct OverlayPlugin;
 
-impl Plugin for UiPlugin {
+impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_systems(Startup, spawn_overlay)
-            // Throttled: re-laying out text every frame costs real CPU at
-            // 380 fps, and a readout nobody can read that fast gains nothing.
             .add_systems(
                 Update,
                 update_stats.run_if(on_timer(Duration::from_millis(250))),
@@ -49,7 +41,6 @@ fn spawn_overlay(mut commands: Commands) {
     ));
 }
 
-/// Averaged FPS + frame time, plus what the renderer is doing to get them.
 fn update_stats(
     diagnostics: Res<DiagnosticsStore>,
     text: Single<&mut Text, With<Stats>>,
@@ -83,8 +74,7 @@ fn update_stats(
         window.resolution.physical_height(),
     );
     let distance_here = scene_distance(&scene.shapes, camera.translation());
-    // The culling box is the difference between a sky ray costing nothing and
-    // costing the whole step budget, and any single stray shape sets its size.
+
     let span = render_params.bounds_max - render_params.bounds_min;
     let shapes = scene.shapes.len();
     let grid = if render_params.grid == 0 {

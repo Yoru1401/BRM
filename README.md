@@ -8,8 +8,13 @@ Bevy 0.19.1, Rust edition 2024.
 ## What it does
 
 One SDF, evaluated twice from the **same packed bytes**: on the GPU in
-`assets/shaders/sdf.wgsl` for rendering, on the CPU in `src/sdf/field.rs` for
-physics. There is no separate collision geometry to keep in step.
+`assets/shaders/` for rendering, on the CPU in `src/sdf/field.rs` for physics.
+There is no separate collision geometry to keep in step.
+
+The shader is seven files — `sdf.wgsl` holds only the entry points and imports
+`bindings`, `shapes`, `operations`, `scene`, `marching` and `lighting`.
+
+The source carries no comments. What a name cannot say lives in `memory/`.
 
 - **Rendering** — ray marching on a single frustum-fitted quad, one ray per
   pixel, against a uniform grid of per-cell shape lists. Over-relaxed steps
@@ -90,17 +95,18 @@ Three folders, by who is allowed to know about whom.
 | module | owns |
 |---|---|
 | `sdf/field` | shapes, packing, the acceleration grid, the field on CPU. Depends on nothing |
-| `sdf/render` | material, quad fitting, debug views |
+| `sdf/render` | material, shader-module loading, quad fitting, debug views |
 | `sdf/light` | point / directional / spot, opt-in soft shadows |
 | `game/world` | the authored scene |
 | `game/physics` | bodies, contacts, sleep |
 | `game/input` | `Action`, `Bindings` |
-| `game/ui` | the stats overlay |
-| `dev/bench` | generated scenes, frame timing |
+| `game/overlay` | the stats overlay |
+| `dev/benchmark` | generated scenes, frame timing |
+| `dev/screenshot` | one deterministic frame to a PNG |
 | `dev/tests` | the test suite |
 
-Every module but `dev/tests` is a Bevy `Plugin`; `main.rs` is ~100 lines
-that adds them. Nothing under
+Every module but `dev/tests` and `command_line` is a Bevy `Plugin`; `main.rs`
+is ~50 lines that adds them. Nothing under
 `sdf/` knows a game exists, so a `bench` run loads that folder alone - which is
 what makes a frame time attributable to the renderer.
 
