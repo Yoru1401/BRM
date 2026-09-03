@@ -6,7 +6,7 @@ use bevy::{
 use core::time::Duration;
 
 use crate::sdf::field::{SdfScene, scene_distance};
-use crate::sdf::render::{Quad, SdfMaterial};
+use crate::sdf::render::{MainCamera, Quad, SdfMaterial};
 
 pub(crate) struct OverlayPlugin;
 
@@ -48,7 +48,7 @@ fn update_stats(
     quad: Single<(&MeshMaterial3d<SdfMaterial>, &Visibility), With<Quad>>,
     materials: Res<Assets<SdfMaterial>>,
     scene: Res<SdfScene>,
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, With<MainCamera>>,
 ) {
     fn avg(store: &DiagnosticsStore, path: &DiagnosticPath) -> f64 {
         store.get(path).and_then(|d| d.average()).unwrap_or(0.0)

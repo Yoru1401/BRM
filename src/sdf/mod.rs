@@ -4,5 +4,6 @@ pub mod brush;
 pub mod distance;
 pub mod field;
 pub mod grid;
+pub mod hierarchy;
 pub mod light;
 pub mod render;

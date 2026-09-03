@@ -18,8 +18,8 @@ struct RenderParams {
     light_count: u32,
     shadow_steps: u32,
     detail: f32,
-    shadow_padding_two: u32,
-    shadow_padding_three: u32,
+    hierarchy: u32,
+    coarse_scale: f32,
 };
 
 struct Shape {

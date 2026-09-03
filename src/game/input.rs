@@ -4,6 +4,7 @@ use bevy::{
 };
 
 use crate::command_line;
+use crate::sdf::render::MainCamera;
 
 pub(crate) struct InputPlugin;
 
@@ -99,7 +100,7 @@ fn read_bindings(
 }
 
 fn fly_camera(
-    camera: Single<&mut Transform, With<Camera3d>>,
+    camera: Single<&mut Transform, With<MainCamera>>,
     actions: Res<ButtonInput<Action>>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,

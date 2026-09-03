@@ -1,4 +1,5 @@
 use bevy::{
+    camera::visibility::RenderLayers,
     prelude::*,
     reflect::TypePath,
     render::{
@@ -12,15 +13,19 @@ use crate::command_line;
 use crate::game::input::Action;
 use crate::sdf::brush::{GpuShape, MAX_SHAPES};
 use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS};
+use crate::sdf::hierarchy;
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 
 pub(crate) struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<SdfMaterial>::default())
-            .add_systems(Startup, (load_shader_modules, spawn_camera))
-            .add_systems(Update, (fit_quad, toggle_debug_view, toggle_quad));
+        app.add_plugins((
+            MaterialPlugin::<SdfMaterial>::default(),
+            hierarchy::HierarchyPlugin,
+        ))
+        .add_systems(Startup, (load_shader_modules, spawn_camera))
+        .add_systems(Update, (fit_quad, toggle_debug_view, toggle_quad));
     }
 }
 
@@ -59,7 +64,10 @@ pub(crate) const DETAIL: f32 = 1.0;
 #[derive(Component)]
 pub(crate) struct Quad;
 
-#[derive(ShaderType, Debug, Clone, Default)]
+#[derive(Component)]
+pub(crate) struct MainCamera;
+
+#[derive(ShaderType, Debug, Clone, Default, PartialEq)]
 pub(crate) struct RenderParams {
     pub(crate) bounds_min: Vec3,
     pub(crate) tan_half_fov: f32,
@@ -88,8 +96,8 @@ pub(crate) struct RenderParams {
 
     pub(crate) shadow_steps: u32,
     pub(crate) detail: f32,
-    pub(crate) shadow_padding_two: u32,
-    pub(crate) shadow_padding_three: u32,
+    pub(crate) hierarchy: u32,
+    pub(crate) coarse_scale: f32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -105,6 +113,9 @@ pub(crate) struct SdfMaterial {
     pub(crate) grid_indices: Handle<ShaderBuffer>,
     #[storage(4, read_only)]
     pub(crate) lights: Handle<ShaderBuffer>,
+
+    #[texture(5)]
+    pub(crate) coarse: Handle<Image>,
 }
 
 impl Material for SdfMaterial {
@@ -120,6 +131,7 @@ fn spawn_camera(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     let shapes = buffers.add(ShaderBuffer::from(vec![GpuShape::default(); MAX_SHAPES]));
@@ -127,33 +139,56 @@ fn spawn_camera(
     let grid_cells = buffers.add(ShaderBuffer::from(vec![0u32; GRID_CELL_WORDS]));
     let grid_indices = buffers.add(ShaderBuffer::from(vec![0u32; GRID_INDEX_WORDS]));
     let lights = buffers.add(ShaderBuffer::from(vec![GpuLight::default(); MAX_LIGHTS]));
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 2.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
-        children![(
-            Quad,
-            Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(1.0)))),
-            MeshMaterial3d(
-                materials.add(SdfMaterial {
-                    render_params: RenderParams {
-                        cull: u32::from(!command_line::flag("--no-cull")),
-                        omega: command_line::value("--omega").unwrap_or(OMEGA),
-                        shadow_steps: command_line::value("--shadow-steps")
-                            .map_or(SHADOW_STEPS, |steps| steps as u32),
-                        detail: command_line::value("--detail").unwrap_or(DETAIL),
 
-                        grid: 1,
-                        ..default()
-                    },
+    let hierarchical = hierarchy::requested();
+    let coarse = images.add(hierarchy::coarse_image(1, 1));
+
+    let render_params = RenderParams {
+        cull: u32::from(!command_line::flag("--no-cull")),
+        omega: command_line::value("--omega").unwrap_or(OMEGA),
+        shadow_steps: command_line::value("--shadow-steps").map_or(SHADOW_STEPS, |s| s as u32),
+        detail: command_line::value("--detail").unwrap_or(DETAIL),
+        hierarchy: 0,
+        coarse_scale: hierarchy::coarse_scale(),
+        grid: 1,
+        ..default()
+    };
+
+    let mesh = meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(1.0)));
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            MainCamera,
+            Transform::from_xyz(0.0, 2.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+            RenderLayers::layer(0),
+            children![(
+                Quad,
+                RenderLayers::layer(0),
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(materials.add(SdfMaterial {
+                    render_params: render_params.clone(),
                     shapes: shapes.clone(),
                     grid_cells: grid_cells.clone(),
                     grid_indices: grid_indices.clone(),
                     lights: lights.clone(),
-                })
-            ),
-            Transform::from_xyz(0.0, 0.0, -QUAD_DIST),
-        )],
-    ));
+                    coarse: coarse.clone(),
+                })),
+                Transform::from_xyz(0.0, 0.0, -QUAD_DIST),
+            )],
+        ))
+        .id();
+
+    if hierarchical {
+        commands.insert_resource(hierarchy::PendingCoarsePass {
+            render_params,
+            mesh,
+            shapes,
+            grid_cells,
+            grid_indices,
+            camera,
+            quad_distance: QUAD_DIST,
+        });
+    }
 }
 
 fn toggle_debug_view(
@@ -181,7 +216,7 @@ fn toggle_quad(actions: Res<ButtonInput<Action>>, visibility: Single<&mut Visibi
 }
 
 fn fit_quad(
-    proj: Single<&Projection, With<Camera3d>>,
+    proj: Single<&Projection, With<MainCamera>>,
     quad: Single<(&mut Mesh3d, &MeshMaterial3d<SdfMaterial>), With<Quad>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SdfMaterial>>,

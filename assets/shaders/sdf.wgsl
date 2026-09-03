@@ -5,6 +5,10 @@
 #import "shaders/marching.wgsl"::{heat, ray_march}
 #import "shaders/lighting.wgsl"::{shade}
 
+const COARSE_SLACK: f32 = 0.02;
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var coarse_distance: texture_2d<f32>;
+
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -31,6 +35,17 @@ struct FragmentOutput {
     @location(0) color: vec4<f32>,
 };
 
+fn head_start(fragment_position: vec2<f32>, span: vec2<f32>) -> f32 {
+    if render_params.hierarchy == 0u {
+        return span.x;
+    }
+    let size = vec2<i32>(textureDimensions(coarse_distance, 0));
+    let uv = fragment_position / max(view.viewport.zw, vec2<f32>(1.0));
+    let texel = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
+    let reached = textureLoad(coarse_distance, texel, 0).r - COARSE_SLACK;
+    return clamp(reached, span.x, span.y);
+}
+
 fn depth_of(world_point: vec3<f32>) -> f32 {
     let clip = view.clip_from_world * vec4<f32>(world_point, 1.0);
     return clip.z / clip.w;
@@ -43,7 +58,13 @@ fn fragment(quad: QuadVertex) -> FragmentOutput {
     let span = scene_bounds_span(ray_origin, ray_direction);
     var march = vec2<f32>(MAX_MARCH_DISTANCE, 0.0);
     if span.y >= span.x {
-        march = ray_march(span.x, MAX_MARCH_STEPS, ray_origin, ray_direction, span.y);
+        march = ray_march(
+            head_start(quad.clip_position.xy, span),
+            MAX_MARCH_STEPS,
+            ray_origin,
+            ray_direction,
+            span.y,
+        );
     }
     let travelled = march.x;
 

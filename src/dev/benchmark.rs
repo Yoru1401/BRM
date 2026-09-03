@@ -8,7 +8,7 @@ use crate::game::world::SdfWorld;
 use crate::sdf::brush::{Albedo, Brush};
 use crate::sdf::grid::GridSettings;
 use crate::sdf::light::{Light, LightKind};
-use crate::sdf::render::{Quad, SdfMaterial};
+use crate::sdf::render::{MainCamera, Quad, SdfMaterial};
 
 const WARMUP_FRAMES: usize = 120;
 
@@ -188,7 +188,7 @@ fn spawn_bench_lights(mut commands: Commands, bench: Res<Bench>) {
     }
 }
 
-fn park_camera(camera: Single<&mut Transform, With<Camera3d>>) {
+fn park_camera(camera: Single<&mut Transform, With<MainCamera>>) {
     *camera.into_inner() = Transform::from_translation(BENCH_EYE).looking_at(Vec3::ZERO, Vec3::Y);
 }
 

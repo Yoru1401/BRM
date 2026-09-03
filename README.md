@@ -71,6 +71,8 @@ stays a `const` beside it.
 | `--shadow-steps <n>` | 48 | steps a shadow ray may take |
 | `--detail <n>` | 1.0 | march stopping tolerance, in pixels. 1.5 at 1080p is 720p's tolerance and 21% cheaper |
 | `--width <n>` / `--height <n>` | 1280 / 720 | window size for `bench` and `shot` |
+| `--hierarchical` | off | coarse pre-pass: a second camera marches cones at reduced resolution and the main pass starts from it. Correct, but not yet shown to be faster |
+| `--coarse-scale <n>` | 4 | how much smaller the coarse pass is |
 | `--speed <n>` | 5.0 | fly camera |
 | `--sensitivity <n>` | 0.003 | mouse look |
 | `--gravity <n>` | 9.81 | downward pull |
