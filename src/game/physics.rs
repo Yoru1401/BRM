@@ -1,9 +1,8 @@
 use bevy::prelude::*;
 
 use crate::command_line;
-use crate::sdf::field::{
-    Albedo, Brush, Modifiers, SdfScene, SphereBody, scene_distance, scene_normal,
-};
+use crate::sdf::brush::{Albedo, Brush, Modifiers, SphereBody};
+use crate::sdf::field::{SdfScene, scene_distance, scene_normal};
 
 pub(crate) struct PhysicsPlugin;
 

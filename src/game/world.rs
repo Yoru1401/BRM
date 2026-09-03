@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::sdf::field::{Albedo, Brush, CsgOperation, GPU_MODE_SUBTRACT, Modifiers};
+use crate::sdf::brush::{Albedo, Brush, CsgOperation, GPU_MODE_SUBTRACT, Modifiers};
 use crate::sdf::light::{Light, LightKind};
 
 pub(crate) struct WorldPlugin;

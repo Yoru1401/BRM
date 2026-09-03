@@ -10,7 +10,8 @@ use bevy::{
 
 use crate::command_line;
 use crate::game::input::Action;
-use crate::sdf::field::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GpuShape, MAX_SHAPES};
+use crate::sdf::brush::{GpuShape, MAX_SHAPES};
+use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS};
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 
 pub(crate) struct RenderPlugin;

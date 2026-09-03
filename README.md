@@ -94,7 +94,12 @@ Three folders, by who is allowed to know about whom.
 
 | module | owns |
 |---|---|
-| `sdf/field` | shapes, packing, the acceleration grid, the field on CPU. Depends on nothing |
+| `sdf/field` | the plugin, `SdfScene`, packing to the GPU, the field on CPU |
+| `sdf/brush` | the `Brush`, its modifiers and the bytes they pack into |
+| `sdf/distance` | the rounded-box kernel |
+| `sdf/blending` | the nine blend modes |
+| `sdf/bounds` | scene bounds and the per-shape cull bound |
+| `sdf/grid` | the acceleration grid and the shadow proxy |
 | `sdf/render` | material, shader-module loading, quad fitting, debug views |
 | `sdf/light` | point / directional / spot, opt-in soft shadows |
 | `game/world` | the authored scene |
