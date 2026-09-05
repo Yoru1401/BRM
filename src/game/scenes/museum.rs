@@ -3,13 +3,17 @@ use bevy::prelude::*;
 use crate::game::scenes::{Exhibit, SdfWorld, floor};
 use crate::sdf::brush::{
     Albedo, Brush, CsgOperation, GPU_MODE_ADD, GPU_MODE_AVOID, GPU_MODE_DEBOSS, GPU_MODE_EMBOSS,
-    GPU_MODE_INTERSECT, GPU_MODE_PAINT, GPU_MODE_PUSH, GPU_MODE_SHELL, GPU_MODE_SUBTRACT,
-    Modifiers,
+    GPU_MODE_PAINT, GPU_MODE_PUSH, GPU_MODE_SUBTRACT, Modifiers,
 };
 use crate::sdf::light::{Light, LightKind};
 
 const SPACING: f32 = 4.0;
 const STAND: f32 = 1.2;
+const STRENGTH: f32 = 0.25;
+const SPHERE: f32 = 0.6;
+
+const STAND_ALBEDO: Vec3 = Vec3::new(0.72, 0.36, 0.22);
+const INCOMING_ALBEDO: Vec3 = Vec3::new(0.28, 0.48, 0.30);
 
 struct Mode {
     name: &'static str,
@@ -17,53 +21,43 @@ struct Mode {
     mode: u32,
 }
 
-const GLOBAL: [Mode; 2] = [
-    Mode {
-        name: "intersect (folds the whole field)",
-        note: "max of the two, so far from the incoming shape it returns the shape, not the                field: everything folded before it is gone. That is why it is first here.",
-        mode: GPU_MODE_INTERSECT,
-    },
-    Mode {
-        name: "shell (folds the whole field)",
-        note: "built on intersect, so it consumes the field the same way",
-        mode: GPU_MODE_SHELL,
-    },
-];
-
 const MODES: [Mode; 7] = [
     Mode {
         name: "add",
-        note: "the nearer of the two; the only mode the cull reject is sound for",
+        note: "the nearer of the two, so the sphere simply joins the box",
         mode: GPU_MODE_ADD,
     },
     Mode {
         name: "subtract",
-        note: "carves the incoming shape out of the field",
+        note: "the sphere carves its own half out of the box and leaves a bowl",
         mode: GPU_MODE_SUBTRACT,
     },
     Mode {
         name: "paint",
-        note: "recolours and leaves the field exactly as it was",
+        note: "the field is returned untouched; only the albedo lookup changes, \
+               so the green patch has no geometry behind it",
         mode: GPU_MODE_PAINT,
     },
     Mode {
         name: "push",
-        note: "offsets the field outwards where the shape reaches",
+        note: "the sphere is added and a gap one strength wide is carved around it, \
+               so it sits in the box without touching it",
         mode: GPU_MODE_PUSH,
     },
     Mode {
         name: "avoid",
-        note: "pushes the field away from the shape instead of into it",
+        note: "push with the roles swapped: the sphere is solid only where it is \
+               more than one strength away from what was already there",
         mode: GPU_MODE_AVOID,
     },
     Mode {
         name: "emboss",
-        note: "raises a lip where the shape meets the surface",
+        note: "raises a lip one strength proud of the box wherever the sphere reaches it",
         mode: GPU_MODE_EMBOSS,
     },
     Mode {
         name: "deboss",
-        note: "sinks a groove where the shape meets the surface",
+        note: "the same offset the other way: a groove one strength deep",
         mode: GPU_MODE_DEBOSS,
     },
 ];
@@ -75,79 +69,66 @@ const SOLID: Modifiers = Modifiers {
     cone: 0.0,
 };
 
+fn stand(x: f32) -> impl Bundle {
+    (
+        Brush,
+        SOLID,
+        Albedo(STAND_ALBEDO),
+        Transform::from_xyz(x, STAND, 0.0),
+    )
+}
+
+fn incoming(x: f32, mode: u32) -> impl Bundle {
+    (
+        Brush,
+        Modifiers {
+            round: 1.0,
+            ..SOLID
+        },
+        CsgOperation {
+            mode,
+            strength: STRENGTH,
+            ..default()
+        },
+        Albedo(INCOMING_ALBEDO),
+        Transform::from_xyz(x, STAND + 0.15, 1.0).with_scale(Vec3::splat(SPHERE)),
+    )
+}
+
 pub(crate) fn spawn(mut commands: Commands) {
     let span = (MODES.len() - 1) as f32 * SPACING;
 
     commands
         .spawn((SdfWorld, Transform::default()))
         .with_children(|root| {
-            for (index, entry) in GLOBAL.iter().enumerate() {
-                let z = -8.0 - index as f32 * 4.0;
-                root.spawn((
-                    Brush,
-                    SOLID,
-                    Albedo(Vec3::new(0.72, 0.36, 0.22)),
-                    Transform::from_xyz(0.0, STAND, z),
-                ));
-                root.spawn((
-                    Brush,
-                    Modifiers {
-                        round: 1.0,
-                        ..SOLID
-                    },
-                    CsgOperation {
-                        mode: entry.mode,
-                        radius: 0.25,
-                        strength: 0.35,
-                        ..default()
-                    },
-                    Albedo(Vec3::new(0.28, 0.48, 0.30)),
-                    Transform::from_xyz(0.7, STAND + 0.5, z + 0.4).with_scale(Vec3::splat(0.9)),
-                ));
-                root.spawn((
-                    Exhibit::new(entry.name, entry.note),
-                    Transform::from_xyz(0.0, STAND, z),
-                ));
-            }
-
             root.spawn(floor(Vec3::new(span * 0.7, 0.5, 14.0), 0.0));
 
             for (index, entry) in MODES.iter().enumerate() {
                 let x = index as f32 * SPACING - span * 0.5;
-
-                root.spawn((
-                    Brush,
-                    SOLID,
-                    Albedo(Vec3::new(0.72, 0.36, 0.22)),
-                    Transform::from_xyz(x, STAND, 0.0).with_scale(Vec3::new(1.0, 1.0, 1.0)),
-                ));
-                root.spawn((
-                    Brush,
-                    Modifiers {
-                        round: 1.0,
-                        ..SOLID
-                    },
-                    CsgOperation {
-                        mode: entry.mode,
-                        radius: 0.25,
-                        strength: 0.25,
-                        ..default()
-                    },
-                    Albedo(Vec3::new(0.28, 0.48, 0.30)),
-                    Transform::from_xyz(x + 0.7, STAND + 0.7, 0.6).with_scale(Vec3::splat(0.75)),
-                ));
+                root.spawn(stand(x));
+                root.spawn(incoming(x, entry.mode));
                 root.spawn((
                     Exhibit::new(entry.name, entry.note),
                     Transform::from_xyz(x, STAND, 0.0),
                 ));
             }
 
+            root.spawn((
+                Exhibit::new(
+                    "intersect and shell are not on show",
+                    "both return the incoming shape far away from it, so each one folds \
+                     the entire field and erases every exhibit declared before it. \
+                     A scene can hold one of them or the other, and nothing else",
+                ),
+                Transform::from_xyz(-span * 0.5 - SPACING, STAND, 0.0),
+            ));
+
             let far = 7.0;
             root.spawn((
                 Brush,
                 Modifiers { cone: 1.0, ..SOLID },
                 Albedo(Vec3::new(0.85, 0.70, 0.35)),
-                Transform::from_xyz(-6.0, 1.5, far).with_scale(Vec3::new(1.5, 1.5, 1.5)),
+                Transform::from_xyz(-6.0, 1.5, far).with_scale(Vec3::splat(1.5)),
             ));
             root.spawn((
                 Exhibit::new(
@@ -165,12 +146,14 @@ pub(crate) fn spawn(mut commands: Commands) {
                     ..SOLID
                 },
                 Albedo(Vec3::new(0.55, 0.55, 0.62)),
-                Transform::from_xyz(0.0, 1.5, far).with_scale(Vec3::new(1.5, 1.5, 1.5)),
+                Transform::from_xyz(0.0, 1.5, far).with_scale(Vec3::splat(1.5)),
             ));
             root.spawn((
                 Exhibit::new(
                     "a wall runs through the height",
-                    "thickness hollows laterally and leaves both ends open: a tube, not a cup",
+                    "thickness hollows laterally and leaves both ends open: a tube, not a cup. \
+                     The bore is empty to the marcher and solid to the shadow proxy, \
+                     which is why no light reaches down it",
                 ),
                 Transform::from_xyz(0.0, 1.5, far),
             ));

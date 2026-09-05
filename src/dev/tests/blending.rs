@@ -71,3 +71,45 @@ fn subtract_carves_a_hole() {
 
     assert!(scene_distance(&scene, Vec3::new(1.5, 0.0, 0.0)) < 0.0);
 }
+
+#[test]
+fn only_intersect_and_shell_reach_beyond_the_incoming_shape() {
+    let far_away = 10.0;
+    let field = -1.0;
+    let with = |mode| {
+        blend(
+            far_away,
+            field,
+            &pack(CsgOperation {
+                mode,
+                strength: 0.25,
+                ..default()
+            }),
+            false,
+        )
+    };
+
+    for mode in [
+        GPU_MODE_ADD,
+        GPU_MODE_SUBTRACT,
+        GPU_MODE_PAINT,
+        GPU_MODE_PUSH,
+        GPU_MODE_AVOID,
+        GPU_MODE_EMBOSS,
+        GPU_MODE_DEBOSS,
+    ] {
+        assert_eq!(
+            with(mode),
+            field,
+            "mode {mode} should leave the field alone"
+        );
+    }
+
+    for mode in [GPU_MODE_INTERSECT, GPU_MODE_SHELL] {
+        assert_eq!(
+            with(mode),
+            far_away,
+            "mode {mode} should return the incoming shape",
+        );
+    }
+}
