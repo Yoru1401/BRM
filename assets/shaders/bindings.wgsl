@@ -1,46 +1,28 @@
 struct RenderParams {
-    bounds_min: vec3<f32>,
-    tan_half_fov: f32,
-    bounds_max: vec3<f32>,
-    padding_one: f32,
-    shape_count: u32,
-    debug_view: u32,
-    cull: u32,
-    omega: f32,
-    grid: u32,
-    grid_indexed: u32,
-    grid_padding_two: u32,
-    grid_origin: vec3<f32>,
-    grid_padding_three: f32,
-    grid_cell: vec3<f32>,
-    grid_padding_four: f32,
-    grid_resolution: vec3<u32>,
+    origin: vec3<f32>,
+    brick_size: f32,
+    bricks: vec3<u32>,
     light_count: u32,
-    shadow_steps: u32,
+    voxel: f32,
+    tan_half_fov: f32,
     detail: f32,
-    hierarchy: u32,
-    coarse_scale: f32,
-    skip_origin: vec3<f32>,
-    skip_levels: u32,
-    skip_cell: vec3<f32>,
-    skip_padding: f32,
+    omega: f32,
+    shadow_steps: u32,
+    debug_view: u32,
+    slot_side: u32,
+    atlas_side: f32,
+    dynamic_count: u32,
+    padding_one: u32,
+    padding_two: u32,
+    padding_three: u32,
+    dynamic_bound: vec4<f32>,
 };
 
-struct Shape {
-    center: vec3<f32>,
-    wall_thickness: f32,
-    half_size: vec3<f32>,
-    side_radius: f32,
-    inverse_rotation: vec4<f32>,
-    albedo: vec3<f32>,
-    cap_radius: f32,
-    cull_extent: vec3<f32>,
-    cull_scale: f32,
-    taper: f32,
-    padding_one: f32,
-    padding_two: f32,
-    padding_three: f32,
-    blend: Blend,
+struct Dynamic {
+    start: vec3<f32>,
+    radius: f32,
+    end: vec3<f32>,
+    padding: f32,
 };
 
 struct GpuLight {
@@ -56,38 +38,26 @@ struct GpuLight {
     softness: f32,
 };
 
-struct Blend {
-    mode: u32,
-    radius: f32,
-    strength: f32,
-    chamfer: u32,
-};
-
-const MODE_ADD: u32 = 0u;
-const MODE_SUBTRACT: u32 = 1u;
-const MODE_INTERSECT: u32 = 2u;
-const MODE_PAINT: u32 = 3u;
-const MODE_PUSH: u32 = 4u;
-const MODE_AVOID: u32 = 5u;
-const MODE_EMBOSS: u32 = 6u;
-const MODE_DEBOSS: u32 = 7u;
-const MODE_SHELL: u32 = 8u;
-
-const GRID_CELL_FULL: u32 = 4294967295u;
-const SKIP_RESOLUTION: u32 = 32u;
-
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> render_params: RenderParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> shapes: array<Shape>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> grid_cells: array<u32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> grid_indices: array<u32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<storage, read> lights: array<GpuLight>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<storage, read> skip_cells: array<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> page: array<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> lights: array<GpuLight>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var atlas: texture_3d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var atlas_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var<storage, read> dynamics: array<Dynamic>;
+
+const BRICK: u32 = 8u;
+const APRON: u32 = 1u;
+const SPAN: u32 = 10u;
+const RANGE_VOXELS: f32 = 4.0;
+const NORMAL_TAP: f32 = 1.0;
+const TAG_EMPTY: u32 = 255u;
+const TAG_SOLID: u32 = 254u;
+const TAG_SHIFT: u32 = 24u;
+const CLEARANCE_MASK: u32 = 16777215u;
 
 const MAX_MARCH_STEPS: i32 = 128;
-const MAX_MARCH_DISTANCE: f32 = 100.0;
+const MAX_MARCH_DISTANCE: f32 = 100000.0;
 const SURFACE_THRESHOLD: f32 = 0.001;
-const NORMAL_EPSILON: f32 = 0.0005;
-const MIN_RADIUS: f32 = 1e-5;
 const AMBIENT: f32 = 0.05;
 
 const LIGHT_DIRECTIONAL: u32 = 0u;

@@ -4,6 +4,7 @@ use bevy::{
 };
 
 use crate::command_line;
+use crate::game::character;
 use crate::sdf::render::MainCamera;
 
 pub(crate) struct InputPlugin;
@@ -13,8 +14,10 @@ impl Plugin for InputPlugin {
         app.init_resource::<Bindings>()
             .init_resource::<Fly>()
             .init_resource::<ButtonInput<Action>>()
-            .add_systems(PreUpdate, read_bindings.after(InputSystems))
-            .add_systems(Update, fly_camera);
+            .add_systems(PreUpdate, read_bindings.after(InputSystems));
+        if !character::playing() {
+            app.add_systems(Update, fly_camera);
+        }
     }
 }
 

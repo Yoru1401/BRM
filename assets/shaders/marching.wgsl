@@ -1,6 +1,6 @@
 #import bevy_pbr::mesh_view_bindings::view
 #import "shaders/bindings.wgsl"::{SURFACE_THRESHOLD, render_params}
-#import "shaders/scene.wgsl"::{scene_distance, scene_distance_gridded}
+#import "shaders/adf.wgsl"::{adf_distance}
 
 fn pixel_radius_per_unit() -> f32 {
     return render_params.detail * render_params.tan_half_fov / max(view.viewport.w, 1.0);
@@ -25,14 +25,13 @@ fn ray_march(
         if step >= step_budget {
             return vec2<f32>(stop_distance, f32(step));
         }
-        let distance = scene_distance_gridded(ray_origin + ray_direction * travelled);
+        let distance = adf_distance(ray_origin + ray_direction * travelled);
         let overshot = relaxation > 1.0 && (abs(distance) + previous_distance) < step_length;
         let close_enough = max(SURFACE_THRESHOLD, travelled * precision_per_unit);
         step++;
 
-        if !overshot && distance < close_enough
-            && scene_distance(ray_origin + ray_direction * travelled) < close_enough {
-            travelled += distance;
+        if !overshot && distance < close_enough {
+            travelled += max(distance, 0.0);
             break;
         }
 

@@ -1,19 +1,25 @@
 #import "shaders/bindings.wgsl"::{AMBIENT, GpuLight, LIGHT_DIRECTIONAL, LIGHT_SPOT, MAX_MARCH_DISTANCE, SHADOW_BIAS, SURFACE_THRESHOLD, lights, render_params}
-#import "shaders/scene.wgsl"::{ShadowProbe, shadow_proxy_distance}
+#import "shaders/adf.wgsl"::{adf_probe}
+
+fn shadow_bias() -> f32 {
+    return max(SHADOW_BIAS, render_params.voxel * 2.0);
+}
 
 fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f32) -> f32 {
     var shade = 1.0;
-    var travelled = SHADOW_BIAS;
+    var travelled = shadow_bias();
     for (var step = 0u; step < render_params.shadow_steps; step++) {
         if travelled >= far {
             break;
         }
-        let probe = shadow_proxy_distance(origin + direction * travelled);
-        if probe.occluder < SURFACE_THRESHOLD {
+        let probe = adf_probe(origin + direction * travelled);
+        if probe.x < SURFACE_THRESHOLD {
             return 0.0;
         }
-        shade = min(shade, softness * probe.occluder / travelled);
-        travelled += probe.advance;
+        if probe.y > 0.5 {
+            shade = min(shade, softness * probe.x / travelled);
+        }
+        travelled += probe.x;
     }
     return clamp(shade, 0.0, 1.0);
 }
@@ -49,7 +55,7 @@ fn light_contribution(light: GpuLight, surface_point: vec3<f32>, normal: vec3<f3
     if light.shadow != 0u {
         let reach = min(distance_to_light, MAX_MARCH_DISTANCE);
         visibility = shadow_factor(
-            surface_point + normal * SHADOW_BIAS,
+            surface_point + normal * shadow_bias(),
             to_light,
             reach,
             max(light.softness, 1e-3),

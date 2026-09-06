@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 
 use crate::game::physics::*;
-use crate::sdf::brush::*;
 
 #[test]
 fn sliding_turns_into_spin() {

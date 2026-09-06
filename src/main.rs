@@ -23,6 +23,7 @@ fn main() {
         sdf::field::FieldPlugin,
         sdf::render::RenderPlugin,
         sdf::light::LightPlugin,
+        sdf::dynamic::DynamicPlugin,
         game::input::InputPlugin,
     ));
 
@@ -32,21 +33,30 @@ fn main() {
 
     match (bench, shot) {
         (Some(bench), _) => {
-            app.add_plugins(dev::benchmark::BenchmarkPlugin(bench));
+            app.add_plugins((
+                game::scene::ScenePlugin,
+                dev::benchmark::BenchmarkPlugin(bench),
+            ));
         }
 
         (None, Some(path)) => {
             app.add_plugins((
-                game::scenes::ScenePlugin(game::scenes::requested()),
+                game::scene::ScenePlugin,
                 dev::screenshot::ScreenshotPlugin(path),
             ));
+            if game::character::playing() {
+                app.add_plugins((game::physics::PhysicsPlugin, game::character::CharacterPlugin));
+            }
         }
         (None, None) => {
             app.add_plugins((
-                game::scenes::ScenePlugin(game::scenes::requested()),
+                game::scene::ScenePlugin,
                 game::physics::PhysicsPlugin,
                 game::overlay::OverlayPlugin,
             ));
+            if game::character::playing() {
+                app.add_plugins(game::character::CharacterPlugin);
+            }
         }
     }
     app.run();

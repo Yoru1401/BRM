@@ -1,272 +1,263 @@
 use bevy::{
+    asset::RenderAssetUsages,
+    gltf::GltfAssetLabel,
+    mesh::{Indices, PrimitiveTopology},
     prelude::*,
-    render::{
-        render_resource::{ShaderType, encase::internal::WriteInto},
-        storage::ShaderBuffer,
-    },
+    render::storage::ShaderBuffer,
 };
 
-use crate::game::scenes::SdfWorld;
-use crate::sdf::blending::blend;
-use crate::sdf::bounds::{scene_bounds, shape_cannot_reach};
-use crate::sdf::brush::{
-    Albedo, Brush, CsgOperation, GpuShape, MAX_SHAPES, Modifiers, SphereBody, pack_brush,
-};
-use crate::sdf::distance::{MAX_MARCH_DISTANCE, shape_distance};
-use crate::sdf::grid::{
-    GRID_CELL_WORDS, GRID_INDEX_WORDS, GridSettings, GridWindow, SKIP_WORDS, SdfGrid, SkipPyramid,
-    build_grid, build_skip_pyramid,
-};
-use crate::sdf::render::{MainCamera, Quad, RenderParams, SdfMaterial};
+use crate::command_line;
+use crate::sdf::adf::{self, Adf};
+use crate::sdf::render::{MainCamera, SdfMaterial, spawn_quad};
 
 pub(crate) struct FieldPlugin;
 
 impl Plugin for FieldPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SdfScene>()
-            .init_resource::<GridSettings>()
-            .add_systems(Update, sync_shapes_to_gpu);
+        app.init_resource::<Adf>()
+            .add_systems(Startup, request_model)
+            .add_systems(Update, bake_when_ready.run_if(resource_exists::<Pending>));
     }
 }
 
-const SURFACE_EPSILON: f32 = 0.0005;
+const MODEL_SIZE: f32 = 1000.0;
+const PLAY_SIZE: f32 = 200.0;
 
-#[derive(Resource, Default)]
-pub(crate) struct SdfScene {
-    pub(crate) shapes: Vec<GpuShape>,
-    pub(crate) static_count: usize,
-    pub(crate) window: GridWindow,
-    pub(crate) skip: SkipPyramid,
+#[derive(Resource)]
+struct Pending(Handle<Mesh>);
 
-    pub(crate) grid: SdfGrid,
+fn request_model(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let handle = match command_line::text("--model") {
+        Some(path) => assets.load(
+            GltfAssetLabel::Primitive {
+                mesh: 0,
+                primitive: 0,
+            }
+            .from_asset(path),
+        ),
+        None => meshes.add(placeholder()),
+    };
+    commands.insert_resource(Pending(handle));
 }
 
-impl SdfScene {
-    pub(crate) fn static_shapes(&self) -> &[GpuShape] {
-        &self.shapes[..self.static_count]
+const TERRAIN_QUADS: usize = 192;
+const TERRAIN_HALF: f32 = 150.0;
+const TERRAIN_RELIEF: f32 = 22.0;
+const TERRAIN_FLOOR: f32 = -12.0;
+const STRUCTURES: usize = 220;
+
+fn ground(x: f32, z: f32) -> f32 {
+    let (mut height, mut amplitude, mut frequency) = (0.0, 1.0, 0.011);
+    for _ in 0..5 {
+        height += amplitude
+            * ((x * frequency * 0.9).sin() * (z * frequency * 1.1 + 0.7).cos()
+                + (x * frequency * 1.7 + 2.0).sin() * (z * frequency * 0.6 - 1.0).sin() * 0.6);
+        amplitude *= 0.5;
+        frequency *= 2.1;
     }
+    height * TERRAIN_RELIEF * 0.6
 }
 
-pub(crate) type StaticBrushQuery = (
-    &'static Brush,
-    Ref<'static, GlobalTransform>,
-    Option<Ref<'static, Modifiers>>,
-    Option<Ref<'static, CsgOperation>>,
-    Option<Ref<'static, Albedo>>,
-);
+fn terrain() -> Mesh {
+    let side = TERRAIN_QUADS + 1;
+    let step = TERRAIN_HALF * 2.0 / TERRAIN_QUADS as f32;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(side * side);
+    for row in 0..side {
+        for column in 0..side {
+            let x = -TERRAIN_HALF + column as f32 * step;
+            let z = -TERRAIN_HALF + row as f32 * step;
+            positions.push([x, ground(x, z), z]);
+        }
+    }
 
-type BrushQuery = (
-    &'static Brush,
-    &'static GlobalTransform,
-    Option<&'static Modifiers>,
-    Option<&'static CsgOperation>,
-    Option<&'static Albedo>,
-);
+    let at = |row: usize, column: usize| (row * side + column) as u32;
+    let mut indices: Vec<u32> = Vec::with_capacity(TERRAIN_QUADS * TERRAIN_QUADS * 6);
+    for row in 0..TERRAIN_QUADS {
+        for column in 0..TERRAIN_QUADS {
+            let (a, b, c, d) = (
+                at(row, column),
+                at(row, column + 1),
+                at(row + 1, column + 1),
+                at(row + 1, column),
+            );
+            indices.extend_from_slice(&[a, c, b, a, d, c]);
+        }
+    }
 
-fn pack_queried_brush(
-    (_, placement, modifiers, operation, albedo): (
-        &Brush,
-        &GlobalTransform,
-        Option<&Modifiers>,
-        Option<&CsgOperation>,
-        Option<&Albedo>,
-    ),
-) -> GpuShape {
-    pack_brush(placement, modifiers, operation, albedo)
+    let mut skirt = |edge: Vec<u32>| {
+        for pair in edge.windows(2) {
+            let (top_one, top_two) = (pair[0], pair[1]);
+            let low_one = positions.len() as u32;
+            let low_two = low_one + 1;
+            positions.push([
+                positions[top_one as usize][0],
+                TERRAIN_FLOOR,
+                positions[top_one as usize][2],
+            ]);
+            positions.push([
+                positions[top_two as usize][0],
+                TERRAIN_FLOOR,
+                positions[top_two as usize][2],
+            ]);
+            indices.extend_from_slice(&[top_one, low_one, low_two, top_one, low_two, top_two]);
+        }
+    };
+    skirt((0..side).map(|column| at(0, column)).collect());
+    skirt((0..side).rev().map(|column| at(side - 1, column)).collect());
+    skirt((0..side).rev().map(|row| at(row, 0)).collect());
+    skirt((0..side).map(|row| at(row, side - 1)).collect());
+
+    let base = positions.len() as u32;
+    for (x, z) in [
+        (-TERRAIN_HALF, -TERRAIN_HALF),
+        (TERRAIN_HALF, -TERRAIN_HALF),
+        (TERRAIN_HALF, TERRAIN_HALF),
+        (-TERRAIN_HALF, TERRAIN_HALF),
+    ] {
+        positions.push([x, TERRAIN_FLOOR, z]);
+    }
+    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+
+    let count = positions.len();
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; count]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; count]);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn placeholder() -> Mesh {
+    let mut world = terrain();
+    let mut add = |part: Mesh, placement: Transform| {
+        let _ = world.merge(&part.transformed_by(placement));
+    };
+
+    let mut seed = 0x9e37_79b9u32;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / 16_777_216.0
+    };
+
+    for index in 0..STRUCTURES {
+        let x = (random() - 0.5) * TERRAIN_HALF * 1.9;
+        let z = (random() - 0.5) * TERRAIN_HALF * 1.9;
+        let floor = ground(x, z);
+        let scale = 0.6 + random() * random() * 4.0;
+
+        match index % 5 {
+            0 | 1 => {
+                let height = 6.0 * scale;
+                add(
+                    Mesh::from(Cuboid::new(4.0 * scale, height, 4.0 * scale)),
+                    Transform::from_xyz(x, floor + height * 0.4, z)
+                        .with_rotation(Quat::from_rotation_y(random() * 3.0)),
+                );
+            }
+            2 => {
+                let height = 10.0 * scale;
+                add(
+                    Cylinder::new(1.4 * scale, height).mesh().resolution(20).build(),
+                    Transform::from_xyz(x, floor + height * 0.35, z),
+                );
+            }
+            3 => add(
+                Sphere::new(2.5 * scale).mesh().ico(3).unwrap(),
+                Transform::from_xyz(x, floor + 1.2 * scale, z),
+            ),
+            _ => add(
+                Mesh::from(ConicalFrustum {
+                    radius_top: 0.5 * scale,
+                    radius_bottom: 3.0 * scale,
+                    height: 8.0 * scale,
+                }),
+                Transform::from_xyz(x, floor + 3.0 * scale, z),
+            ),
+        }
+    }
+
+    for slot in 0..4 {
+        let turn = slot as f32 / 4.0 * std::f32::consts::TAU;
+        let (x, z) = (turn.cos() * 60.0, turn.sin() * 60.0);
+        add(
+            Torus::new(2.0, 12.0)
+                .mesh()
+                .major_resolution(48)
+                .minor_resolution(16)
+                .build(),
+            Transform::from_xyz(x, ground(x, z) + 10.0, z)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        );
+    }
+    world
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn sync_shapes_to_gpu(
-    world: Single<&Children, With<SdfWorld>>,
-    statics: Query<StaticBrushQuery>,
-    bodies: Query<BrushQuery, With<SphereBody>>,
-    eye: Single<&GlobalTransform, With<MainCamera>>,
-    quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
+fn bake_when_ready(
+    mut commands: Commands,
+    pending: Res<Pending>,
+    camera: Single<(Entity, &mut Transform), With<MainCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
-    mut scene: ResMut<SdfScene>,
-    settings: Res<GridSettings>,
+    mut adf: ResMut<Adf>,
 ) {
-    let following = settings
-        .cell_size
-        .map(|cell| GridWindow::around(eye.translation(), cell, settings.resolution));
-
-    let statics_moved =
-        settings.is_changed() || static_brushes_changed(&world, &statics, scene.static_count);
-    let window_moved = following.is_some_and(|window| window != scene.window);
-    if !statics_moved && !window_moved && packed_bodies_match(&bodies, &scene) {
-        return;
-    }
-    let packed_bodies = collect_bodies(&bodies);
-
-    let Some(mut material) = materials.get_mut(&quad.0) else {
+    let Some(mesh) = meshes.get(&pending.0) else {
         return;
     };
-
-    if statics_moved {
-        let packed = collect_statics(&world, &statics);
-        scene.static_count = packed.len();
-        scene.shapes = packed;
-    } else {
-        let unchanged = scene.static_count;
-        scene.shapes.truncate(unchanged);
+    let mut triangles = adf::triangles_of(mesh);
+    commands.remove_resource::<Pending>();
+    if triangles.is_empty() {
+        error!("model has no triangles; nothing to bake");
+        return;
     }
-    scene.shapes.extend(packed_bodies);
-    drop_overflowing_brushes(&mut scene);
 
-    let bounds = scene_bounds(&scene.shapes);
-    scene.window =
-        following.unwrap_or_else(|| GridWindow::covering(bounds.0, bounds.1, settings.resolution));
-    scene.grid = build_grid(&scene.shapes, scene.window);
-    scene.skip = match settings.enabled {
-        true => build_skip_pyramid(&scene.shapes, bounds.0, bounds.1),
-        false => SkipPyramid::default(),
-    };
-    describe_scene_to_shader(
-        &mut material.render_params,
-        &scene.shapes,
-        bounds,
-        &scene.grid,
-        &scene.skip,
-        &settings,
+    adf::fit(
+        &mut triangles,
+        command_line::value("--size").unwrap_or(match command_line::flag("--play") {
+            true => PLAY_SIZE,
+            false => MODEL_SIZE,
+        }),
+    );
+    let started = std::time::Instant::now();
+    *adf = adf::bake(&triangles);
+    let (low, high) = adf.bounds();
+    info!(
+        "adf: {} triangles, {} bricks of {}, {:.3} m voxels, {} m across, {} MB atlas, {} MB page, baked in {:.2} s",
+        triangles.len(),
+        adf.used,
+        adf::brick_budget(),
+        adf.voxel,
+        (high - low).max_element().round(),
+        adf.atlas.len() >> 20,
+        (adf.page.len() * 4) >> 20,
+        started.elapsed().as_secs_f32()
     );
 
-    let (shapes, cells, indices, skip) = (
-        material.shapes.clone(),
-        material.grid_cells.clone(),
-        material.grid_indices.clone(),
-        material.skip_cells.clone(),
-    );
-    upload_padded(&mut buffers, &shapes, &scene.shapes, MAX_SHAPES);
-    upload_padded(&mut buffers, &cells, &scene.grid.cells, GRID_CELL_WORDS);
-    upload_padded(
+    let (entity, mut placement) = camera.into_inner();
+    *placement = viewpoint(&adf);
+    spawn_quad(
+        &mut commands,
+        entity,
+        &adf,
+        &mut meshes,
+        &mut materials,
+        &mut images,
         &mut buffers,
-        &indices,
-        &scene.grid.indices,
-        GRID_INDEX_WORDS,
     );
-    upload_padded(&mut buffers, &skip, &scene.skip.occupied, SKIP_WORDS);
 }
 
-pub(crate) fn static_brushes_changed(
-    world: &Children,
-    statics: &Query<StaticBrushQuery>,
-    counted_before: usize,
-) -> bool {
-    let mut count = 0;
-    let mut moved = false;
-    for brush in world.iter() {
-        let Ok((_, placement, modifiers, operation, albedo)) = statics.get(brush) else {
-            continue;
-        };
-        count += 1;
-        moved |= placement.is_changed()
-            || modifiers.is_some_and(|value| value.is_changed())
-            || operation.is_some_and(|value| value.is_changed())
-            || albedo.is_some_and(|value| value.is_changed());
-    }
-    moved || count != counted_before
-}
-
-fn collect_statics(world: &Children, statics: &Query<StaticBrushQuery>) -> Vec<GpuShape> {
-    world
-        .iter()
-        .filter_map(|brush| statics.get(brush).ok())
-        .map(|(_, placement, modifiers, operation, albedo)| {
-            pack_brush(
-                &placement,
-                modifiers.as_deref(),
-                operation.as_deref(),
-                albedo.as_deref(),
-            )
-        })
-        .collect()
-}
-
-fn packed_bodies_match(bodies: &Query<BrushQuery, With<SphereBody>>, scene: &SdfScene) -> bool {
-    collect_bodies(bodies) == scene.shapes[scene.static_count..]
-}
-
-fn collect_bodies(bodies: &Query<BrushQuery, With<SphereBody>>) -> Vec<GpuShape> {
-    bodies.iter().map(pack_queried_brush).collect()
-}
-
-fn drop_overflowing_brushes(scene: &mut SdfScene) {
-    if scene.shapes.len() <= MAX_SHAPES {
-        return;
-    }
-    warn!(
-        "scene has {} brushes, buffer holds {MAX_SHAPES}; the rest are dropped",
-        scene.shapes.len()
-    );
-    scene.shapes.truncate(MAX_SHAPES);
-    scene.static_count = scene.static_count.min(MAX_SHAPES);
-}
-
-fn describe_scene_to_shader(
-    params: &mut RenderParams,
-    shapes: &[GpuShape],
-    bounds: (Vec3, Vec3),
-    grid: &SdfGrid,
-    skip: &SkipPyramid,
-    settings: &GridSettings,
-) {
-    (params.bounds_min, params.bounds_max) = bounds;
-    params.shape_count = shapes.len() as u32;
-    params.grid_indexed = grid.indexed as u32;
-    params.grid = u32::from(settings.enabled);
-    params.grid_resolution = grid.resolution;
-    params.grid_origin = grid.origin;
-    params.grid_cell = grid.cell_size;
-    params.skip_origin = skip.origin;
-    params.skip_cell = skip.finest_cell;
-    params.skip_levels = skip.levels;
-}
-
-fn upload_padded<T>(
-    buffers: &mut Assets<ShaderBuffer>,
-    handle: &Handle<ShaderBuffer>,
-    values: &[T],
-    capacity: usize,
-) where
-    T: Clone + Default,
-    Vec<T>: ShaderType + WriteInto,
-{
-    let Some(mut buffer) = buffers.get_mut(handle) else {
-        return;
-    };
-    let mut padded = values.to_vec();
-    padded.resize_with(capacity, T::default);
-    buffer.set_data(padded);
-}
-
-const TETRAHEDRON_CORNERS: [Vec3; 4] = [
-    Vec3::new(1.0, -1.0, -1.0),
-    Vec3::new(-1.0, -1.0, 1.0),
-    Vec3::new(-1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, 1.0),
-];
-
-pub(crate) fn scene_normal(shapes: &[GpuShape], world_point: Vec3) -> Vec3 {
-    TETRAHEDRON_CORNERS
-        .iter()
-        .map(|corner| *corner * scene_distance(shapes, world_point + *corner * SURFACE_EPSILON))
-        .sum::<Vec3>()
-        .normalize_or_zero()
-}
-
-pub(crate) fn scene_distance(shapes: &[GpuShape], world_point: Vec3) -> f32 {
-    let mut field = MAX_MARCH_DISTANCE;
-    for (index, shape) in shapes.iter().enumerate() {
-        if index > 0 && shape_cannot_reach(shape, world_point, field) {
-            continue;
-        }
-        let distance = shape_distance(shape, world_point);
-        field = if index == 0 {
-            distance
-        } else {
-            blend(distance, field, &shape.blend, shape.blend.chamfer != 0)
-        };
-    }
-    field
+fn viewpoint(adf: &Adf) -> Transform {
+    let (low, high) = adf.bounds();
+    let centre = (low + high) * 0.5;
+    let reach = (high - low).max_element();
+    Transform::from_translation(centre + Vec3::new(0.0, reach * 0.35, reach * 0.8))
+        .looking_at(centre, Vec3::Y)
 }

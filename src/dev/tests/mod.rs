@@ -1,14 +1,6 @@
-mod benchmark;
-mod blending;
-mod brush;
+mod adf;
+mod character;
 mod command_line;
-mod culling;
-mod grid;
-mod helpers;
 mod input;
-mod lighting;
 mod physics;
-mod rebuild_cost;
-mod skip;
-mod static_changes;
-mod window;
+mod settling;

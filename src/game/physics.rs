@@ -1,8 +1,29 @@
 use bevy::prelude::*;
 
 use crate::command_line;
-use crate::sdf::brush::SphereBody;
-use crate::sdf::field::{SdfScene, scene_distance, scene_normal};
+use crate::sdf::adf::Adf;
+use crate::sdf::dynamic::Dynamic;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct SphereBody {
+    pub(crate) radius: f32,
+    pub(crate) velocity: Vec3,
+    pub(crate) angular_velocity: Vec3,
+    pub(crate) orientation: Quat,
+    pub(crate) resting: bool,
+}
+
+impl Default for SphereBody {
+    fn default() -> Self {
+        SphereBody {
+            radius: 0.5,
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            resting: false,
+        }
+    }
+}
 
 pub(crate) struct PhysicsPlugin;
 
@@ -15,7 +36,7 @@ impl Plugin for PhysicsPlugin {
                     .chain()
                     .run_if(static_field_is_ready),
             )
-            .add_systems(Update, draw_body_spin);
+            .add_systems(Update, (draw_body_spin, track_bodies));
     }
 }
 
@@ -55,60 +76,66 @@ const SLEEP_CLEARANCE: f32 = 0.02;
 
 const KILL_BELOW: f32 = -50.0;
 
-fn static_field_is_ready(scene: Res<SdfScene>) -> bool {
-    scene.static_count > 0
+const SUBSTEPS: usize = 4;
+
+const SWEEP_STEPS: usize = 16;
+
+fn static_field_is_ready(field: Res<Adf>) -> bool {
+    field.used > 0
 }
 
 fn simulate_bodies(
     mut bodies: Query<(&mut SphereBody, &mut Transform)>,
-    scene: Res<SdfScene>,
+    field: Res<Adf>,
     time: Res<Time<Fixed>>,
     tuning: Res<Tuning>,
 ) {
-    let step = time.delta_secs();
-    let statics = scene.static_shapes();
+    let step = time.delta_secs() / SUBSTEPS as f32;
 
     for (mut body, mut placement) in &mut bodies {
         if body.resting {
-            let clearance = scene_distance(statics, placement.translation) - body.radius;
+            let clearance = field.distance(placement.translation) - body.radius;
             if clearance <= SLEEP_CLEARANCE {
                 continue;
             }
             body.resting = false;
         }
 
-        body.velocity += tuning.gravity * step;
-        placement.translation += body.velocity * step;
-        if body.angular_velocity != Vec3::ZERO {
-            body.orientation = (Quat::from_scaled_axis(body.angular_velocity * step)
-                * body.orientation)
-                .normalize();
-        }
+        for _ in 0..SUBSTEPS {
+            body.velocity += tuning.gravity * step;
+            placement.translation = swept(&field, placement.translation, body.velocity * step);
+            if body.angular_velocity != Vec3::ZERO {
+                body.orientation = (Quat::from_scaled_axis(body.angular_velocity * step)
+                    * body.orientation)
+                    .normalize();
+            }
 
-        let penetration = body.radius - scene_distance(statics, placement.translation);
-        if penetration <= 0.0 {
-            continue;
-        }
-        let normal = scene_normal(statics, placement.translation);
-        placement.translation += normal * penetration;
+            let (clearance, banded) = field.probe(placement.translation);
+            let penetration = body.radius - clearance;
+            if penetration <= 0.0 || !banded {
+                continue;
+            }
+            let normal = field.normal(placement.translation);
+            placement.translation += normal * penetration;
 
-        let speed_into_surface = body.velocity.dot(normal);
-        let normal_impulse = (-speed_into_surface).max(0.0);
-        if speed_into_surface < 0.0 {
-            body.velocity -= normal * speed_into_surface * (1.0 + RESTITUTION);
-        }
+            let speed_into_surface = body.velocity.dot(normal);
+            let normal_impulse = (-speed_into_surface).max(0.0);
+            if speed_into_surface < 0.0 {
+                body.velocity -= normal * speed_into_surface * (1.0 + RESTITUTION);
+            }
 
-        let (velocity_change, spin_change) = contact_friction(
-            normal,
-            body.velocity,
-            body.angular_velocity,
-            body.radius,
-            normal_impulse,
-            tuning.friction,
-        );
-        body.velocity += velocity_change;
-        body.angular_velocity += spin_change;
-        body.angular_velocity *= (1.0 - ANGULAR_DAMPING_PER_SECOND * step).max(0.0);
+            let (velocity_change, spin_change) = contact_friction(
+                normal,
+                body.velocity,
+                body.angular_velocity,
+                body.radius,
+                normal_impulse,
+                tuning.friction,
+            );
+            body.velocity += velocity_change;
+            body.angular_velocity += spin_change;
+            body.angular_velocity *= (1.0 - ANGULAR_DAMPING_PER_SECOND * step).max(0.0);
+        }
 
         if body.velocity.length() < SLEEP_SPEED && body.angular_velocity.length() < SLEEP_SPIN {
             body.velocity = Vec3::ZERO;
@@ -116,6 +143,26 @@ fn simulate_bodies(
             body.resting = true;
         }
     }
+}
+
+pub(crate) fn swept(field: &Adf, from: Vec3, travel: Vec3) -> Vec3 {
+    let reach = travel.length();
+    if reach < 1e-6 {
+        return from;
+    }
+    let direction = travel / reach;
+    let mut moved = 0.0;
+    for _ in 0..SWEEP_STEPS {
+        if moved >= reach {
+            break;
+        }
+        let room = field.distance(from + direction * moved);
+        if room <= 0.0 {
+            break;
+        }
+        moved = (moved + room).min(reach);
+    }
+    from + direction * moved
 }
 
 pub(crate) fn contact_friction(
@@ -195,6 +242,12 @@ fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
             a_body.resting = false;
             b_body.resting = false;
         }
+    }
+}
+
+fn track_bodies(mut bodies: Query<(&SphereBody, &Transform, &mut Dynamic)>) {
+    for (body, placement, mut shape) in &mut bodies {
+        *shape = Dynamic::ball(placement.translation, body.radius);
     }
 }
 

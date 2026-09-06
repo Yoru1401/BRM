@@ -7,32 +7,84 @@ Bevy 0.19.1, Rust edition 2024.
 
 ## What it does
 
-One SDF, evaluated twice from the **same packed bytes**: on the GPU in
-`assets/shaders/` for rendering, on the CPU in `src/sdf/field.rs` for physics.
-There is no separate collision geometry to keep in step.
+**The field is baked, and there are no primitives.** Nothing in the engine knows
+what a sphere or a box is, in Rust or in WGSL. You hand it a triangle mesh; it
+voxelises that mesh into a sparse brick volume at startup, and everything after
+that reads the volume.
 
-The shader is seven files — `sdf.wgsl` holds only the entry points and imports
-`bindings`, `shapes`, `operations`, `scene`, `marching` and `lighting`.
+- **Bake** — `src/sdf/adf.rs`. Triangles are binned per brick, each brick holds
+  8³ voxels plus a one-voxel apron, and every voxel stores the signed distance to
+  the mesh, biased down by half a voxel diagonal so the trilinear reconstruction
+  can never overestimate. Sign comes from an angle-weighted pseudonormal at the
+  closest point. Bricks with no geometry near them are not allocated; the ones
+  inside the model are marked solid by a flood fill from outside.
+- **Store** — a `u32` page table, one entry per brick, plus one `R8Unorm` 3D
+  texture atlas. Both are sized to the model at bake time and uploaded once; a
+  1 km world is 1 MB of page and 99 MB of atlas. A page word is either an atlas
+  slot or a tag plus the brick's *clearance* — how many bricks of proven empty
+  space surround it.
+- **Render** — ray marching on a single frustum-fitted quad, one ray per pixel.
+  A step is one page read and one hardware-trilinear fetch. Empty bricks return
+  `inscribed + clearance * brick_size`, a proven underestimate, and that is the
+  whole of the empty-space acceleration.
+  Over-relaxation is available (`--omega`) but off by default: on a field of
+  bounds it eats holes in grazing silhouettes. The fragment stage writes real
+  depth, so ordinary Bevy 3D entities share the world and occlude correctly.
+- **Dynamics** — anything that moves is a `Dynamic { start, end, radius }`
+  capsule, uploaded per frame and folded into the field by `min` after the brick
+  lookup. Physics bodies and the character are therefore ray-marched, lit and
+  shadowed like the world, with no mesh of their own. `min` is the only operator
+  a baked field admits: subtract or intersect would need the field before the
+  bake collapsed it.
+- **Physics** — sphere rigidbodies against `Adf::distance`, the CPU mirror of the
+  same bytes, with rotation, friction, a Coulomb limit and sleep. Motion is
+  swept: the frame's travel is sphere-traced through the field, so a centre can
+  never cross a surface however fast it is going. Penetration is resolved only
+  against a *banded* sample, where the field is a real distance rather than the
+  conservative bound it returns elsewhere — without that, bodies hover metres up
+  on a bound that crossed their radius early.
+- **Character** — a floating-capsule controller behind `--play`, ported from
+  [Joe Binns's stylised controller](https://joebinns.com/stylised-character-controller)
+  and the Toyful Games approach behind it. No ground collider: a spring holds it
+  at a ride height above a downward sphere trace, an angular spring keeps it
+  upright and leans it into acceleration, movement is a clamped acceleration
+  toward a ramped goal velocity, and the jump has an input buffer, coyote time
+  and variable gravity so holding the button jumps higher.
+- **Lights** — point, directional and spot, with opt-in shadows that march the
+  real field. Three lights with a shadow caster cost 0.02 ms more than one light
+  with none. Only samples from the encoded band may drive the penumbra, so
+  shadows are hard beyond four voxels: a bound undershoots, and shading one
+  paints brick-shaped patches across every shadowed surface.
+
+The shader is five files — `sdf.wgsl` holds only the entry points and imports
+`bindings`, `adf`, `marching` and `lighting`.
 
 The source carries no comments. What a name cannot say lives in `memory/`.
-
-- **Rendering** — ray marching on a single frustum-fitted quad, one ray per
-  pixel, against a uniform grid of per-cell shape lists. Over-relaxed steps
-  (Keinert et al.). The fragment stage writes real depth, so ordinary Bevy 3D
-  entities share the world and occlude correctly.
-- **Geometry** — one entity per brush, authored in `bsn!`. Every brush is a
-  box; `Transform` sets its size, `Modifiers { round, bevel, thickness, cone }`
-  its shape, and `CsgOperation` + `Albedo` how it blends and looks. A full
-  round is an exact sphere, a full bevel an exact cylinder, a cone a pyramid.
-  Brushes blend in child order.
-- **Physics** — sphere rigidbodies (a fully-rounded brush) against the field, with rotation, friction,
-  a Coulomb limit and sleep.
 
 ## Run
 
 ```sh
 cargo run --release
+cargo run --release -- --play
+cargo run --release -- --model models/thing.glb
 ```
+
+`--play` spawns the character, switches to a collision-aware follow camera and
+defaults the world to 200 m so the voxels are character-scale. `WASD` moves
+relative to the camera, `Space` jumps, right-drag orbits.
+
+Without `--model` it generates a **1 km open world** — sine-noise terrain closed
+with a skirt and a floor, 220 structures planted at ground height, four torus
+arches — merges it into one mesh and bakes it in about 8.5 s. It is a
+placeholder, not a feature.
+
+```
+adf: 105346 triangles, 101348 bricks of 150000, 1.099 m voxels,
+     1037 m across, 99 MB atlas, 1 MB page, baked in 8.5 s
+```
+
+**3.40 ms at 720p** with four lights and a shadowed sun. A 20 m map reads
+2.62 ms, so the frame cost tracks screen coverage rather than world size.
 
 Debug builds are misleading: `debug-assertions` are profile-wide and put a
 ~2 ms floor under every frame.
@@ -46,59 +98,40 @@ Debug builds are misleading: `debug-assertions` are profile-wide and put a
 ## Benchmark
 
 ```sh
-cargo run --release -- bench empty        # the march against an empty field
-cargo run --release -- bench grid:20      # 20 boxes tiling a fixed slab
-cargo run --release -- bench spread:80    # 80 boxes scattered over a level
-cargo run --release -- bench spread:80 --no-grid --repeat 3
+cargo run --release -- bench --repeat 3
+cargo run --release -- bench --repeat 3 --lights 3 --shadows 1
 ```
 
-Prints one tab-separated line of min / median / p95 frame ms and exits. The
-count scenes tile the same volume, so only the shape count changes - not the
-screen coverage. Use `--repeat 4` and read run 3 or later: the first block is
-still warming up, and can catch the shader before it has loaded.
+Prints one tab-separated line of min / median / p95 frame ms and exits. Use
+`--repeat 3` or more and read the last run: the first block is still warming up,
+and can catch the shader before it has loaded.
 
 ## Flags
 
-Every knob that used to need a recompile takes a flag, on any run — ordinary,
-`bench` or `shot`. The module that owns a value reads its own flag; the default
-stays a `const` beside it.
+Every knob takes a flag, on any run — ordinary, `bench` or `shot`. The module
+that owns a value reads its own flag; the default stays a `const` beside it.
 
 | flag | default | what |
 |---|---|---|
+| `--model <path>` | the test map | glTF mesh to bake, first mesh, first primitive |
+| `--size <m>` | 1000.0 | widest extent the model is scaled to |
+| `--bricks <n>` | 150000 | brick budget; the bake coarsens the voxel until it fits |
+| `--voxel <m>` | derived | pin the voxel size instead of deriving it |
+| `--bodies <n>` | 6 | spheres dropped on it |
+| `--play` | off | character controller and follow camera; defaults `--size` to 200 |
 | `--omega <n>` | 1.2 | march over-relaxation; 1.0 is plain sphere tracing |
-| `--grid <n>` / `--no-grid` | 16 | acceleration grid cells along the longest axis |
-| `--no-cull` | on | the per-shape box reject |
-| `--shadow-steps <n>` | 48 | steps a shadow ray may take |
-| `--detail <n>` | 1.0 | march stopping tolerance, in pixels. 1.5 at 1080p is 720p's tolerance and 21% cheaper |
-| `--width <n>` / `--height <n>` | 1280 / 720 | window size for `bench` and `shot` |
-| `--hierarchical` | off | coarse pre-pass: a second camera marches cones at reduced resolution and the main pass starts from it. Correct, but not yet shown to be faster |
-| `--coarse-scale <n>` | 4 | how much smaller the coarse pass is |
+| `--shadow-steps <n>` | 48 | steps a shadow ray may take; `0` turns shadows off, which is the A/B that isolates them |
+| `--detail <n>` | 1.0 | march stopping tolerance, in pixels |
+| `--res <name>` | 720p | `540p` … `4k`; `--width` / `--height` override |
+| `--render-scale <n>` | 1.0 | march at a fraction of the window and upscale |
 | `--speed <n>` | 5.0 | fly camera |
 | `--sensitivity <n>` | 0.003 | mouse look |
 | `--gravity <n>` | 9.81 | downward pull |
 | `--friction <n>` | 0.6 | Coulomb limit at a contact |
 
 ```sh
-cargo run --release -- --speed 12 --gravity 3
+cargo run --release -- --model models/thing.glb --size 8 --bodies 0
 ```
-
-## Scenes
-
-Documentation you walk through rather than read. `--scene` works on an ordinary
-run, a `shot` and a `bench` alike.
-
-```sh
-cargo run --release -- --scene zoo
-```
-
-| scene | what it is |
-|---|---|
-| `showcase` (default) | the authored world |
-| `zoo` | every shape the four modifiers reach, swept in code so it cannot fall out of date |
-| `museum` | the nine blend modes and the field behaviours that surprise people |
-| `gym` | physics: ramps by angle, drop lanes, the tube, the sleep pad |
-
-The overlay names the nearest exhibit and what it is for.
 
 ## Screenshot
 
@@ -106,9 +139,8 @@ The overlay names the nearest exhibit and what it is for.
 cargo run --release -- shot out.png
 ```
 
-The authored world, camera parked, physics and overlay off. Two builds differ
-only where the shader does, which is what makes an A/B of a rendering change
-readable.
+Camera parked, physics and overlay off. Two builds differ only where the shader
+does, which is what makes an A/B of a rendering change readable.
 
 ## Layout
 
@@ -116,31 +148,54 @@ Three folders, by who is allowed to know about whom.
 
 | module | owns |
 |---|---|
-| `sdf/field` | the plugin, `SdfScene`, packing to the GPU, the field on CPU |
-| `sdf/brush` | the `Brush`, its modifiers and the bytes they pack into |
-| `sdf/distance` | the rounded-box kernel |
-| `sdf/blending` | the nine blend modes |
-| `sdf/bounds` | scene bounds and the per-shape cull bound |
-| `sdf/grid` | the acceleration grid and the shadow proxy |
+| `sdf/adf` | the bake, the brick layout, the CPU sampler |
+| `sdf/field` | loading the model, baking once, spawning the quad |
 | `sdf/render` | material, shader-module loading, quad fitting, debug views |
 | `sdf/light` | point / directional / spot, opt-in soft shadows |
-| `game/world` | the authored scene |
+| `game/scene` | lights and bodies |
+| `game/character` | the floating-capsule controller and its camera |
 | `game/physics` | bodies, contacts, sleep |
 | `game/input` | `Action`, `Bindings` |
 | `game/overlay` | the stats overlay |
-| `dev/benchmark` | generated scenes, frame timing |
+| `dev/benchmark` | frame timing |
 | `dev/screenshot` | one deterministic frame to a PNG |
 | `dev/tests` | the test suite |
 
-Every module but `dev/tests` and `command_line` is a Bevy `Plugin`; `main.rs`
-is ~50 lines that adds them. Nothing under
-`sdf/` knows a game exists, so a `bench` run loads that folder alone - which is
-what makes a frame time attributable to the renderer.
+Every module but `dev/tests` and `command_line` is a Bevy `Plugin`; `main.rs` is
+56 lines that adds them. Nothing under `sdf/` knows a game exists, so a `bench`
+run loads that folder alone — which is what makes a frame time attributable to
+the renderer.
 
 ## Tests
 
 ```sh
-cargo test
+cargo test --release
 ```
 
-The field is checked against closed-form distances rather than against itself.
+The bake is checked against closed-form distances: a cube's field must never
+overestimate, its interior must read negative, its normals must point out of the
+nearest face. One ignored diagnostic measures how far the reconstructed normal
+drifts from an analytic torus, and how much of that is the mesh's own faceting:
+
+```sh
+cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --nocapture
+```
+
+## Known limits
+
+- One volume, baked whole before the first frame: about 12 s per 100k bricks.
+  Nothing streams, and a model change is a restart. **This is the practical cap
+  on world size, not memory and not the GPU.**
+- The page table is dense — one word per brick over the whole volume — so memory
+  grows with world volume. A 4 km world at 1 m voxels is refused.
+- Sign needs a closed mesh. An open or self-intersecting one bakes without a
+  warning and gets wrong interiors.
+- Normals carry ~2.9° of mean error from the trilinear reconstruction and 8-bit
+  quantisation. The fix is a 16-bit atlas; it has not been done.
+- Soft shadows are hard shadows: the penumbra is only as wide as the encoded
+  band, four voxels.
+- No CSG. Two models cannot be combined; the field is whatever the triangles say.
+- Dynamics render but do not collide with each other through the field: the CPU
+  field is the baked one only.
+- Body radius is capped at `range * 0.9`, so **physics scale is limited by bake
+  resolution** — a 1 km world at 1.1 m voxels cannot carry metre-scale bodies.

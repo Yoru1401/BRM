@@ -5,8 +5,7 @@ use bevy::{
 };
 use core::time::Duration;
 
-use crate::game::scenes::{Exhibit, Scene, nearest_exhibit};
-use crate::sdf::field::{SdfScene, scene_distance};
+use crate::sdf::adf::Adf;
 use crate::sdf::render::{MainCamera, Quad, SdfMaterial};
 
 pub(crate) struct OverlayPlugin;
@@ -48,10 +47,8 @@ fn update_stats(
     window: Single<&Window>,
     quad: Single<(&MeshMaterial3d<SdfMaterial>, &Visibility), With<Quad>>,
     materials: Res<Assets<SdfMaterial>>,
-    scene: Res<SdfScene>,
+    field: Res<Adf>,
     camera: Single<&GlobalTransform, With<MainCamera>>,
-    exhibits: Query<(&Exhibit, &GlobalTransform)>,
-    active_scene: Res<Scene>,
 ) {
     fn avg(store: &DiagnosticsStore, path: &DiagnosticPath) -> f64 {
         store.get(path).and_then(|d| d.average()).unwrap_or(0.0)
@@ -59,14 +56,9 @@ fn update_stats(
     let fps = avg(&diagnostics, &FrameTimeDiagnosticsPlugin::FPS);
     let ms = avg(&diagnostics, &FrameTimeDiagnosticsPlugin::FRAME_TIME);
     let (quad_material, visibility) = *quad;
-    let render_params = materials
-        .get(&quad_material.0)
-        .map(|material| material.render_params.clone())
-        .unwrap_or_default();
-    let view = if render_params.debug_view == 1 {
-        "steps"
-    } else {
-        "shaded"
+    let view = match materials.get(&quad_material.0) {
+        Some(material) if material.render_params.debug_view == 1 => "steps",
+        _ => "shaded",
     };
     let shown = match visibility {
         Visibility::Hidden => "hidden",
@@ -76,47 +68,21 @@ fn update_stats(
         window.resolution.physical_width(),
         window.resolution.physical_height(),
     );
-    let distance_here = scene_distance(&scene.shapes, camera.translation());
-
-    let span = render_params.bounds_max - render_params.bounds_min;
-    let shapes = scene.shapes.len();
-    let grid = if render_params.grid == 0 {
-        "off".to_string()
-    } else {
-        let cells = render_params.grid_resolution;
-        format!("{}x{}x{} cells", cells.x, cells.y, cells.z)
-    };
-    let caption = match nearest_exhibit(camera.translation(), &exhibits) {
-        Some((name, note, distance)) if distance < 6.0 => format!(
-            "
-
-{name}
-{note}"
-        ),
-        Some((name, _, _)) => format!(
-            "
-
-nearest: {name}"
-        ),
-        None => String::new(),
-    };
-    let scene = match *active_scene {
-        Scene::Showcase => "showcase",
-        Scene::Zoo => "zoo",
-        Scene::Museum => "museum",
-        Scene::Gym => "gym",
-    };
+    let here = field.distance(camera.translation());
+    let bricks = field.bricks;
+    let (low, high) = field.bounds();
+    let span = high - low;
 
     text.into_inner().0 = format!(
         "{fps:.1} fps avg\n\
          {ms:.3} ms avg\n\
          {width}x{height}\n\
-         grid: {grid}\n\
+         page: {}x{}x{} bricks, {} filled\n\
+         voxel: {:.4} m\n\
          quad: {shown}  [V]\n\
          view: {view}  [H]\n\
-         cpu sdf here: {distance_here:.3}\n\
-         shapes: {shapes}  bounds: {:.0} x {:.0} x {:.0}
-         scene: {scene}{caption}",
-        span.x, span.y, span.z
+         cpu sdf here: {here:.3}\n\
+         bounds: {:.1} x {:.1} x {:.1}",
+        bricks.x, bricks.y, bricks.z, field.used, field.voxel, span.x, span.y, span.z
     );
 }
