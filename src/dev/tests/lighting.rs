@@ -81,7 +81,7 @@ fn the_soft_shadow_ratio_is_not_darkened_by_the_grid() {
     ];
 
     let (bounds_min, bounds_max) = scene_bounds(&shapes);
-    let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+    let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
     let exact = |point| scene_distance(&shapes, point);
     let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
 
@@ -180,9 +180,9 @@ fn the_shadow_proxy_bounds_the_field_and_still_lets_light_through() {
     ];
 
     let (bounds_min, bounds_max) = scene_bounds(&shapes);
-    let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+    let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
     let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
-    let proxy = |point| shadow_proxy_distance(&shapes, &grid, point);
+    let proxy = |point| shadow_proxy_distance(&shapes, &grid, point).advance;
 
     let (mut outside, mut inside, mut loose) = (0, 0, 0);
     for xi in 0..13 {
@@ -237,4 +237,65 @@ fn the_shadow_proxy_bounds_the_field_and_still_lets_light_through() {
         checked += 1;
     }
     assert_eq!(checked, 12);
+}
+
+#[test]
+fn a_camera_window_does_not_dim_a_lit_surface() {
+    const SOFTNESS: f32 = 12.0;
+    const BIAS: f32 = 0.02;
+    const STEPS: u32 = 48;
+
+    let penumbra = |probe: &dyn Fn(Vec3) -> crate::sdf::grid::ShadowProbe,
+                    origin: Vec3,
+                    direction: Vec3,
+                    far: f32| {
+        let mut shade = 1.0f32;
+        let mut travelled = BIAS;
+        for _ in 0..STEPS {
+            if travelled >= far {
+                break;
+            }
+            let reading = probe(origin + direction * travelled);
+            if reading.occluder < 0.001 {
+                return 0.0;
+            }
+            shade = shade.min(SOFTNESS * reading.occluder / travelled);
+            travelled += reading.advance;
+        }
+        shade.clamp(0.0, 1.0)
+    };
+
+    let shapes = vec![
+        shaped(
+            Transform {
+                translation: Vec3::new(0.0, -0.5, 0.0),
+                scale: Vec3::new(20.0, 1.0, 20.0),
+                ..default()
+            },
+            Modifiers::default(),
+        ),
+        shaped(Transform::from_xyz(0.0, 1.5, 0.0), sphere_modifiers()),
+    ];
+
+    let window = GridWindow::around(Vec3::new(0.0, 3.0, 11.0), 2.0, 16);
+    let grid = build_grid(&shapes, window);
+
+    let sun = Vec3::Y;
+    let mut lit = 0;
+    for step in 0..24 {
+        let x = -18.0 + step as f32 * 1.5;
+        let ground = Vec3::new(x, 0.52, -6.0);
+        let shade = penumbra(
+            &|point| shadow_proxy_distance(&shapes, &grid, point),
+            ground + sun * 0.02,
+            sun,
+            40.0,
+        );
+        assert!(
+            shade > 0.99,
+            "open ground at {ground} came back at {shade}: the cell wall was mistaken              for an occluder",
+        );
+        lit += 1;
+    }
+    assert!(lit > 20, "only {lit} points were tested");
 }

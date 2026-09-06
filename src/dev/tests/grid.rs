@@ -134,7 +134,10 @@ fn the_grid_never_reports_more_than_the_exact_field() {
                 .collect();
 
             let (bounds_min, bounds_max) = scene_bounds(&shapes);
-            let grid = build_grid(&shapes, bounds_min, bounds_max, resolution);
+            let grid = build_grid(
+                &shapes,
+                GridWindow::covering(bounds_min, bounds_max, resolution),
+            );
 
             for _ in 0..60 {
                 let point = Vec3::new(spread!(12.0), spread!(12.0), spread!(12.0));
@@ -196,7 +199,7 @@ fn a_gridded_march_hits_what_the_exact_one_hits() {
             .collect();
 
         let (bounds_min, bounds_max) = scene_bounds(&shapes);
-        let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+        let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
         let exact = |point| scene_distance(&shapes, point);
         let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
 
@@ -243,7 +246,7 @@ fn a_long_ray_inside_the_grid_still_arrives() {
         cube_at(Vec3::new(20.0, 0.0, 20.0)),
     ];
     let (bounds_min, bounds_max) = scene_bounds(&anchors);
-    let planes = build_grid(&anchors, bounds_min, bounds_max, 16);
+    let planes = build_grid(&anchors, GridWindow::covering(bounds_min, bounds_max, 16));
 
     for step in 2..planes.resolution.x - 2 {
         for nudge in [0.0f32, 0.002, -0.002] {
@@ -251,7 +254,7 @@ fn a_long_ray_inside_the_grid_still_arrives() {
             let mut shapes = anchors.to_vec();
             shapes.push(cube_at(Vec3::new(x, 0.0, -15.0)));
 
-            let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+            let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
             let exact = |point| scene_distance(&shapes, point);
             let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
 
@@ -311,7 +314,7 @@ fn a_body_outside_the_grid_still_lowers_the_field() {
     shapes.push(body_at(Vec3::new(0.0, 3.0, 0.0), 0.8));
 
     let (bounds_min, bounds_max) = scene_bounds(&statics);
-    let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+    let grid = build_grid(&statics, GridWindow::covering(bounds_min, bounds_max, 16));
     assert_eq!(grid.indexed, statics.len());
 
     let beside_the_body = Vec3::new(0.0, 4.4, 0.0);
@@ -332,12 +335,15 @@ fn a_body_outside_the_grid_still_lowers_the_field() {
 fn a_moving_body_leaves_the_static_grid_untouched() {
     let statics = a_room();
     let (bounds_min, bounds_max) = scene_bounds(&statics);
-    let before = build_grid(&statics, bounds_min, bounds_max, 16);
+    let before = build_grid(&statics, GridWindow::covering(bounds_min, bounds_max, 16));
 
     for height in [3.0, 2.0, 1.0, 0.5] {
         let mut shapes = statics.clone();
         shapes.push(body_at(Vec3::new(0.3, height, -0.4), 0.8));
-        let after = build_grid(&shapes[..statics.len()], bounds_min, bounds_max, 16);
+        let after = build_grid(
+            &shapes[..statics.len()],
+            GridWindow::covering(bounds_min, bounds_max, 16),
+        );
         assert_eq!(before, after, "the grid moved when only a body did");
     }
 }
@@ -369,7 +375,7 @@ fn bodies_outside_the_grid_never_report_more_than_the_exact_field() {
         }
 
         let (bounds_min, bounds_max) = scene_bounds(&statics);
-        let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+        let grid = build_grid(&statics, GridWindow::covering(bounds_min, bounds_max, 16));
 
         for _ in 0..80 {
             let point = Vec3::new(spread!(5.0), 0.5 + next() * 4.5, spread!(5.0));
@@ -400,7 +406,7 @@ fn a_march_past_bodies_outside_the_grid_hits_what_the_exact_one_hits() {
     shapes.push(body_at(Vec3::new(-2.5, 2.0, 1.5), 0.7));
 
     let (bounds_min, bounds_max) = scene_bounds(&statics);
-    let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+    let grid = build_grid(&statics, GridWindow::covering(bounds_min, bounds_max, 16));
     let exact = |point| scene_distance(&shapes, point);
     let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
 

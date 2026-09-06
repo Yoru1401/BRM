@@ -8,7 +8,7 @@ struct RenderParams {
     cull: u32,
     omega: f32,
     grid: u32,
-    grid_padding: u32,
+    grid_indexed: u32,
     grid_padding_two: u32,
     grid_origin: vec3<f32>,
     grid_padding_three: f32,

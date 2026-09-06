@@ -13,8 +13,10 @@ use crate::sdf::brush::{
     Albedo, Brush, CsgOperation, GpuShape, MAX_SHAPES, Modifiers, SphereBody, pack_brush,
 };
 use crate::sdf::distance::{MAX_MARCH_DISTANCE, shape_distance};
-use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GridSettings, SdfGrid, build_grid};
-use crate::sdf::render::{Quad, RenderParams, SdfMaterial};
+use crate::sdf::grid::{
+    GRID_CELL_WORDS, GRID_INDEX_WORDS, GridSettings, GridWindow, SdfGrid, build_grid,
+};
+use crate::sdf::render::{MainCamera, Quad, RenderParams, SdfMaterial};
 
 pub(crate) struct FieldPlugin;
 
@@ -32,6 +34,7 @@ const SURFACE_EPSILON: f32 = 0.0005;
 pub(crate) struct SdfScene {
     pub(crate) shapes: Vec<GpuShape>,
     pub(crate) static_count: usize,
+    pub(crate) window: GridWindow,
 
     pub(crate) grid: SdfGrid,
 }
@@ -75,18 +78,24 @@ pub(crate) fn sync_shapes_to_gpu(
     world: Single<&Children, With<SdfWorld>>,
     statics: Query<StaticBrushQuery>,
     bodies: Query<BrushQuery, With<SphereBody>>,
+    eye: Single<&GlobalTransform, With<MainCamera>>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut scene: ResMut<SdfScene>,
     settings: Res<GridSettings>,
 ) {
+    let following = settings
+        .cell_size
+        .map(|cell| GridWindow::around(eye.translation(), cell, settings.resolution));
+
     let statics_moved =
         settings.is_changed() || static_brushes_changed(&world, &statics, scene.static_count);
-    let packed_bodies = collect_bodies(&bodies);
-    if !statics_moved && packed_bodies == scene.shapes[scene.static_count..] {
+    let window_moved = following.is_some_and(|window| window != scene.window);
+    if !statics_moved && !window_moved && packed_bodies_match(&bodies, &scene) {
         return;
     }
+    let packed_bodies = collect_bodies(&bodies);
 
     let Some(mut material) = materials.get_mut(&quad.0) else {
         return;
@@ -104,7 +113,9 @@ pub(crate) fn sync_shapes_to_gpu(
     drop_overflowing_brushes(&mut scene);
 
     let bounds = scene_bounds(&scene.shapes);
-    scene.grid = build_grid(&scene.shapes, bounds.0, bounds.1, settings.resolution);
+    scene.window =
+        following.unwrap_or_else(|| GridWindow::covering(bounds.0, bounds.1, settings.resolution));
+    scene.grid = build_grid(&scene.shapes, scene.window);
     describe_scene_to_shader(
         &mut material.render_params,
         &scene.shapes,
@@ -163,6 +174,10 @@ fn collect_statics(world: &Children, statics: &Query<StaticBrushQuery>) -> Vec<G
         .collect()
 }
 
+fn packed_bodies_match(bodies: &Query<BrushQuery, With<SphereBody>>, scene: &SdfScene) -> bool {
+    collect_bodies(bodies) == scene.shapes[scene.static_count..]
+}
+
 fn collect_bodies(bodies: &Query<BrushQuery, With<SphereBody>>) -> Vec<GpuShape> {
     bodies.iter().map(pack_queried_brush).collect()
 }
@@ -188,6 +203,7 @@ fn describe_scene_to_shader(
 ) {
     (params.bounds_min, params.bounds_max) = bounds;
     params.shape_count = shapes.len() as u32;
+    params.grid_indexed = grid.indexed as u32;
     params.grid = u32::from(settings.enabled);
     params.grid_resolution = grid.resolution;
     params.grid_origin = grid.origin;

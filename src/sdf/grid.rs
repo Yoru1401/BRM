@@ -22,6 +22,7 @@ pub(crate) const GRID_CELL_FULL: u32 = u32::MAX;
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct GridSettings {
     pub(crate) resolution: u32,
+    pub(crate) cell_size: Option<f32>,
     pub(crate) enabled: bool,
 }
 
@@ -30,8 +31,47 @@ impl Default for GridSettings {
         GridSettings {
             resolution: command_line::value("--grid")
                 .map_or(GRID_DEFAULT_RESOLUTION, |cells| cells as u32),
+            cell_size: command_line::value("--cell"),
             enabled: !command_line::flag("--no-grid"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct GridWindow {
+    pub(crate) origin: Vec3,
+    pub(crate) cell_size: Vec3,
+    pub(crate) resolution: UVec3,
+}
+
+impl GridWindow {
+    pub(crate) fn around(centre: Vec3, cell_size: f32, resolution: u32) -> Self {
+        let resolution = UVec3::splat(resolution.clamp(1, GRID_MAX_RESOLUTION));
+        let cell = cell_size.max(MIN_RADIUS);
+        let corner = centre - resolution.as_vec3() * cell * 0.5;
+        GridWindow {
+            origin: (corner / cell).floor() * cell,
+            cell_size: Vec3::splat(cell),
+            resolution,
+        }
+    }
+
+    pub(crate) fn covering(minimum: Vec3, maximum: Vec3, resolution: u32) -> Self {
+        let span = (maximum - minimum).max(Vec3::splat(MIN_RADIUS));
+        let cell = span.max_element() / resolution.clamp(1, GRID_MAX_RESOLUTION) as f32;
+        GridWindow {
+            origin: minimum,
+            cell_size: Vec3::splat(cell),
+            resolution: (span / cell)
+                .ceil()
+                .as_uvec3()
+                .max(UVec3::ONE)
+                .min(UVec3::splat(GRID_MAX_RESOLUTION)),
+        }
+    }
+
+    fn far_corner(&self) -> Vec3 {
+        self.origin + self.cell_size * self.resolution.as_vec3()
     }
 }
 
@@ -88,28 +128,13 @@ impl SdfGrid {
     }
 }
 
-pub(crate) fn build_grid(
-    shapes: &[GpuShape],
-    bounds_min: Vec3,
-    bounds_max: Vec3,
-    resolution: u32,
-) -> SdfGrid {
-    let requested = resolution.clamp(1, GRID_MAX_RESOLUTION);
-    let span = (bounds_max - bounds_min).max(Vec3::splat(MIN_RADIUS));
-
-    let side = span.max_element() / requested as f32;
-    let cell_size = Vec3::splat(side);
-    let resolution = (span / side)
-        .ceil()
-        .as_uvec3()
-        .max(UVec3::ONE)
-        .min(UVec3::splat(GRID_MAX_RESOLUTION));
-    let cells_total = (resolution.x * resolution.y * resolution.z) as usize;
+pub(crate) fn build_grid(shapes: &[GpuShape], window: GridWindow) -> SdfGrid {
+    let cells_total = (window.resolution.x * window.resolution.y * window.resolution.z) as usize;
 
     let mut grid = SdfGrid {
-        origin: bounds_min,
-        cell_size,
-        resolution,
+        origin: window.origin,
+        cell_size: window.cell_size,
+        resolution: window.resolution,
         cells: vec![0; cells_total * 2],
         indices: Vec::new(),
         indexed: shapes.len(),
@@ -118,20 +143,20 @@ pub(crate) fn build_grid(
         return grid;
     }
 
-    let margin = SdfGrid::overlap(cell_size);
+    let margin = SdfGrid::overlap(window.cell_size);
 
     let range_of = |index: usize, shape: &GpuShape| -> (Vec3, Vec3) {
         if index == 0 || shape.blend.mode != GPU_MODE_ADD {
-            return (bounds_min, bounds_max);
+            return (window.origin, window.far_corner());
         }
         (
             shape.center - shape.cull_extent - margin,
             shape.center + shape.cull_extent + margin,
         )
     };
-    let last = (resolution - UVec3::ONE).as_vec3();
+    let last = (window.resolution - UVec3::ONE).as_vec3();
     let slots = |corner: Vec3| -> [usize; 3] {
-        let slot = ((corner - bounds_min) / cell_size)
+        let slot = ((corner - window.origin) / window.cell_size)
             .floor()
             .clamp(Vec3::ZERO, last);
         [slot.x as usize, slot.y as usize, slot.z as usize]
@@ -145,8 +170,9 @@ pub(crate) fn build_grid(
         for z in from[2]..=to[2] {
             for y in from[1]..=to[1] {
                 for x in from[0]..=to[0] {
-                    let cell =
-                        x + y * resolution.x as usize + z * (resolution.x * resolution.y) as usize;
+                    let cell = x
+                        + y * window.resolution.x as usize
+                        + z * (window.resolution.x * window.resolution.y) as usize;
                     counts[cell] += 1;
                     total += 1;
                 }
@@ -175,8 +201,9 @@ pub(crate) fn build_grid(
         for z in from[2]..=to[2] {
             for y in from[1]..=to[1] {
                 for x in from[0]..=to[0] {
-                    let cell =
-                        x + y * resolution.x as usize + z * (resolution.x * resolution.y) as usize;
+                    let cell = x
+                        + y * window.resolution.x as usize
+                        + z * (window.resolution.x * window.resolution.y) as usize;
                     let at = (grid.cells[cell * 2] + written[cell]) as usize;
                     grid.indices[at] = index as u32;
                     written[cell] += 1;
@@ -256,10 +283,26 @@ pub(crate) fn shadow_proxy_bound(shape: &GpuShape, world_point: Vec3) -> f32 {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ShadowProbe {
+    pub(crate) occluder: f32,
+    pub(crate) advance: f32,
+}
+
 #[allow(dead_code)]
-pub(crate) fn shadow_proxy_distance(shapes: &[GpuShape], grid: &SdfGrid, world_point: Vec3) -> f32 {
+pub(crate) fn shadow_proxy_distance(
+    shapes: &[GpuShape],
+    grid: &SdfGrid,
+    world_point: Vec3,
+) -> ShadowProbe {
     let bound = |shape: &GpuShape| shadow_proxy_bound(shape, world_point);
-    let everything = || shapes.iter().map(bound).fold(MAX_MARCH_DISTANCE, f32::min);
+    let everything = || {
+        let reach = shapes.iter().map(bound).fold(MAX_MARCH_DISTANCE, f32::min);
+        ShadowProbe {
+            occluder: reach,
+            advance: reach,
+        }
+    };
 
     if grid.cells.len() < grid.cell_count() * 2 || shapes.is_empty() || !grid.holds(world_point) {
         return everything();
@@ -271,15 +314,19 @@ pub(crate) fn shadow_proxy_distance(shapes: &[GpuShape], grid: &SdfGrid, world_p
     }
 
     let offset = grid.cells[cell * 2] as usize;
-    let mut field = (0..count as usize)
+    let listed = (0..count as usize)
         .map(|slot| bound(&shapes[grid.indices[offset + slot] as usize]))
         .fold(MAX_MARCH_DISTANCE, f32::min);
-
-    if count as usize != grid.indexed {
-        field = field.min(grid.exit_distance(world_point));
-    }
-    shapes[grid.indexed.min(shapes.len())..]
+    let occluder = shapes[grid.indexed.min(shapes.len())..]
         .iter()
         .map(bound)
-        .fold(field, f32::min)
+        .fold(listed, f32::min);
+
+    ShadowProbe {
+        occluder,
+        advance: match count as usize == grid.indexed {
+            true => occluder,
+            false => occluder.min(grid.exit_distance(world_point)),
+        },
+    }
 }

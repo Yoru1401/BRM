@@ -108,7 +108,12 @@ fn shadow_proxy_bound(shape: Shape, world_position: vec3<f32>) -> f32 {
     );
 }
 
-fn shadow_proxy_distance(world_position: vec3<f32>) -> f32 {
+struct ShadowProbe {
+    occluder: f32,
+    advance: f32,
+};
+
+fn shadow_proxy_distance(world_position: vec3<f32>) -> ShadowProbe {
     var field = MAX_MARCH_DISTANCE;
     var count = 0u;
     var offset = 0u;
@@ -127,17 +132,20 @@ fn shadow_proxy_distance(world_position: vec3<f32>) -> f32 {
         for (var i = 0u; i < render_params.shape_count; i++) {
             field = min(field, shadow_proxy_bound(shapes[i], world_position));
         }
-        return field;
+        return ShadowProbe(field, field);
     }
 
     for (var slot = 0u; slot < count; slot++) {
         let shape = shapes[grid_indices[offset + slot]];
         field = min(field, shadow_proxy_bound(shape, world_position));
     }
-    if count == render_params.shape_count {
-        return field;
+    for (var i = render_params.grid_indexed; i < render_params.shape_count; i++) {
+        field = min(field, shadow_proxy_bound(shapes[i], world_position));
     }
-    return min(field, grid_exit_distance(world_position));
+    if count == render_params.grid_indexed {
+        return ShadowProbe(field, field);
+    }
+    return ShadowProbe(field, min(field, grid_exit_distance(world_position)));
 }
 
 fn scene_albedo(world_position: vec3<f32>) -> vec3<f32> {

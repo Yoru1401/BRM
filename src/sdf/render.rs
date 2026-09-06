@@ -83,7 +83,7 @@ pub(crate) struct RenderParams {
     pub(crate) omega: f32,
 
     pub(crate) grid: u32,
-    pub(crate) grid_padding: u32,
+    pub(crate) grid_indexed: u32,
     pub(crate) grid_padding_two: u32,
 
     pub(crate) grid_origin: Vec3,

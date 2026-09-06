@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use crate::dev::tests::helpers::placed;
 use crate::sdf::bounds::scene_bounds;
 use crate::sdf::brush::{CsgOperation, GPU_MODE_ADD, GPU_MODE_SUBTRACT, GpuShape, MAX_SHAPES};
-use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS, build_grid};
+use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS, GridWindow, build_grid};
 use bevy::render::storage::ShaderBuffer;
 
 fn scene_of(count: usize, carved: usize) -> Vec<GpuShape> {
@@ -73,8 +73,10 @@ fn what_a_rebuild_costs() {
         let shapes = scene_of(count, carved);
         let bounds_cost = time(200, || scene_bounds(&shapes));
         let (bounds_min, bounds_max) = scene_bounds(&shapes);
-        let build_cost = time(200, || build_grid(&shapes, bounds_min, bounds_max, 16));
-        let grid = build_grid(&shapes, bounds_min, bounds_max, 16);
+        let build_cost = time(200, || {
+            build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16))
+        });
+        let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
 
         let pad_shapes = time(200, || pad(&shapes, MAX_SHAPES));
         let pad_cells = time(200, || pad(&grid.cells, GRID_CELL_WORDS));

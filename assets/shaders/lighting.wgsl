@@ -1,5 +1,5 @@
 #import "shaders/bindings.wgsl"::{AMBIENT, GpuLight, LIGHT_DIRECTIONAL, LIGHT_SPOT, MAX_MARCH_DISTANCE, SHADOW_BIAS, SURFACE_THRESHOLD, lights, render_params}
-#import "shaders/scene.wgsl"::{shadow_proxy_distance}
+#import "shaders/scene.wgsl"::{ShadowProbe, shadow_proxy_distance}
 
 fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f32) -> f32 {
     var shade = 1.0;
@@ -8,12 +8,12 @@ fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f3
         if travelled >= far {
             break;
         }
-        let distance = shadow_proxy_distance(origin + direction * travelled);
-        if distance < SURFACE_THRESHOLD {
+        let probe = shadow_proxy_distance(origin + direction * travelled);
+        if probe.occluder < SURFACE_THRESHOLD {
             return 0.0;
         }
-        shade = min(shade, softness * distance / travelled);
-        travelled += distance;
+        shade = min(shade, softness * probe.occluder / travelled);
+        travelled += probe.advance;
     }
     return clamp(shade, 0.0, 1.0);
 }
