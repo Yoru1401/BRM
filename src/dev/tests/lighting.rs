@@ -83,7 +83,7 @@ fn the_soft_shadow_ratio_is_not_darkened_by_the_grid() {
     let (bounds_min, bounds_max) = scene_bounds(&shapes);
     let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
     let exact = |point| scene_distance(&shapes, point);
-    let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+    let gridded = |point| scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
 
     let sun = Vec3::Y;
     let mut checked = 0;
@@ -181,7 +181,7 @@ fn the_shadow_proxy_bounds_the_field_and_still_lets_light_through() {
 
     let (bounds_min, bounds_max) = scene_bounds(&shapes);
     let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
-    let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+    let gridded = |point| scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
     let proxy = |point| shadow_proxy_distance(&shapes, &grid, point).advance;
 
     let (mut outside, mut inside, mut loose) = (0, 0, 0);

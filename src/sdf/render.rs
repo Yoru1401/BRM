@@ -12,7 +12,7 @@ use bevy::{
 use crate::command_line;
 use crate::game::input::Action;
 use crate::sdf::brush::{GpuShape, MAX_SHAPES};
-use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS};
+use crate::sdf::grid::{GRID_CELL_WORDS, GRID_INDEX_WORDS, SKIP_WORDS};
 use crate::sdf::hierarchy;
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 
@@ -98,6 +98,11 @@ pub(crate) struct RenderParams {
     pub(crate) detail: f32,
     pub(crate) hierarchy: u32,
     pub(crate) coarse_scale: f32,
+
+    pub(crate) skip_origin: Vec3,
+    pub(crate) skip_levels: u32,
+    pub(crate) skip_cell: Vec3,
+    pub(crate) skip_padding: f32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -116,6 +121,9 @@ pub(crate) struct SdfMaterial {
 
     #[texture(5)]
     pub(crate) coarse: Handle<Image>,
+
+    #[storage(6, read_only)]
+    pub(crate) skip_cells: Handle<ShaderBuffer>,
 }
 
 impl Material for SdfMaterial {
@@ -139,6 +147,7 @@ fn spawn_camera(
     let grid_cells = buffers.add(ShaderBuffer::from(vec![0u32; GRID_CELL_WORDS]));
     let grid_indices = buffers.add(ShaderBuffer::from(vec![0u32; GRID_INDEX_WORDS]));
     let lights = buffers.add(ShaderBuffer::from(vec![GpuLight::default(); MAX_LIGHTS]));
+    let skip_cells = buffers.add(ShaderBuffer::from(vec![0u32; SKIP_WORDS]));
 
     let hierarchical = hierarchy::requested();
     let coarse = images.add(hierarchy::coarse_image(1, 1));
@@ -172,6 +181,7 @@ fn spawn_camera(
                     grid_indices: grid_indices.clone(),
                     lights: lights.clone(),
                     coarse: coarse.clone(),
+                    skip_cells: skip_cells.clone(),
                 })),
                 Transform::from_xyz(0.0, 0.0, -QUAD_DIST),
             )],

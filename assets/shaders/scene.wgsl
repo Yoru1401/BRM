@@ -1,4 +1,4 @@
-#import "shaders/bindings.wgsl"::{GRID_CELL_FULL, MAX_MARCH_DISTANCE, MODE_ADD, MODE_INTERSECT, MODE_SUBTRACT, NORMAL_EPSILON, Shape, grid_cells, grid_indices, render_params, shapes}
+#import "shaders/bindings.wgsl"::{GRID_CELL_FULL, SKIP_RESOLUTION, skip_cells, MAX_MARCH_DISTANCE, MODE_ADD, MODE_INTERSECT, MODE_SUBTRACT, NORMAL_EPSILON, Shape, grid_cells, grid_indices, render_params, shapes}
 #import "shaders/shapes.wgsl"::{footprint_of, rotate_by_quaternion, rounded_box_distance, shape_distance}
 #import "shaders/operations.wgsl"::{blend_shape}
 
@@ -61,8 +61,50 @@ fn grid_exit_distance(world_position: vec3<f32>) -> f32 {
     return max(min(to_wall.x, min(to_wall.y, to_wall.z)), 0.0);
 }
 
+fn skip_side(level: u32) -> u32 {
+    return max(SKIP_RESOLUTION >> level, 1u);
+}
+
+fn skip_offset(level: u32) -> u32 {
+    var total = 0u;
+    for (var earlier = 0u; earlier < level; earlier++) {
+        let side = skip_side(earlier);
+        total += side * side * side;
+    }
+    return total;
+}
+
+fn empty_span(point: vec3<f32>) -> f32 {
+    for (var step = 0u; step < render_params.skip_levels; step++) {
+        let level = render_params.skip_levels - 1u - step;
+        let cell = render_params.skip_cell * f32(1u << level);
+        let side = skip_side(level);
+        let last = vec3<f32>(f32(side - 1u));
+        let local = (point - render_params.skip_origin) / cell;
+        if any(local < vec3<f32>(0.0)) || any(local > last + vec3<f32>(1.0)) {
+            continue;
+        }
+        let slot = clamp(floor(local), vec3<f32>(0.0), last);
+        let index = skip_offset(level)
+            + u32(slot.x)
+            + u32(slot.y) * side
+            + u32(slot.z) * side * side;
+        if skip_cells[index] != 0u {
+            continue;
+        }
+        let low = render_params.skip_origin + slot * cell;
+        let gap = min(point - low, low + cell - point);
+        return max(min(gap.x, min(gap.y, gap.z)), 0.0);
+    }
+    return 0.0;
+}
+
 fn scene_distance_gridded(world_position: vec3<f32>) -> f32 {
     if render_params.grid == 0u || !grid_holds(world_position) {
+        let span = empty_span(world_position);
+        if span > 0.0 {
+            return span;
+        }
         return scene_distance(world_position);
     }
     let cell = grid_cell(world_position);

@@ -14,7 +14,8 @@ use crate::sdf::brush::{
 };
 use crate::sdf::distance::{MAX_MARCH_DISTANCE, shape_distance};
 use crate::sdf::grid::{
-    GRID_CELL_WORDS, GRID_INDEX_WORDS, GridSettings, GridWindow, SdfGrid, build_grid,
+    GRID_CELL_WORDS, GRID_INDEX_WORDS, GridSettings, GridWindow, SKIP_WORDS, SdfGrid, SkipPyramid,
+    build_grid, build_skip_pyramid,
 };
 use crate::sdf::render::{MainCamera, Quad, RenderParams, SdfMaterial};
 
@@ -35,6 +36,7 @@ pub(crate) struct SdfScene {
     pub(crate) shapes: Vec<GpuShape>,
     pub(crate) static_count: usize,
     pub(crate) window: GridWindow,
+    pub(crate) skip: SkipPyramid,
 
     pub(crate) grid: SdfGrid,
 }
@@ -116,18 +118,24 @@ pub(crate) fn sync_shapes_to_gpu(
     scene.window =
         following.unwrap_or_else(|| GridWindow::covering(bounds.0, bounds.1, settings.resolution));
     scene.grid = build_grid(&scene.shapes, scene.window);
+    scene.skip = match settings.enabled {
+        true => build_skip_pyramid(&scene.shapes, bounds.0, bounds.1),
+        false => SkipPyramid::default(),
+    };
     describe_scene_to_shader(
         &mut material.render_params,
         &scene.shapes,
         bounds,
         &scene.grid,
+        &scene.skip,
         &settings,
     );
 
-    let (shapes, cells, indices) = (
+    let (shapes, cells, indices, skip) = (
         material.shapes.clone(),
         material.grid_cells.clone(),
         material.grid_indices.clone(),
+        material.skip_cells.clone(),
     );
     upload_padded(&mut buffers, &shapes, &scene.shapes, MAX_SHAPES);
     upload_padded(&mut buffers, &cells, &scene.grid.cells, GRID_CELL_WORDS);
@@ -137,6 +145,7 @@ pub(crate) fn sync_shapes_to_gpu(
         &scene.grid.indices,
         GRID_INDEX_WORDS,
     );
+    upload_padded(&mut buffers, &skip, &scene.skip.occupied, SKIP_WORDS);
 }
 
 pub(crate) fn static_brushes_changed(
@@ -199,6 +208,7 @@ fn describe_scene_to_shader(
     shapes: &[GpuShape],
     bounds: (Vec3, Vec3),
     grid: &SdfGrid,
+    skip: &SkipPyramid,
     settings: &GridSettings,
 ) {
     (params.bounds_min, params.bounds_max) = bounds;
@@ -208,6 +218,9 @@ fn describe_scene_to_shader(
     params.grid_resolution = grid.resolution;
     params.grid_origin = grid.origin;
     params.grid_cell = grid.cell_size;
+    params.skip_origin = skip.origin;
+    params.skip_cell = skip.finest_cell;
+    params.skip_levels = skip.levels;
 }
 
 fn upload_padded<T>(

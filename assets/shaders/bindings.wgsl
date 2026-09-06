@@ -20,6 +20,10 @@ struct RenderParams {
     detail: f32,
     hierarchy: u32,
     coarse_scale: f32,
+    skip_origin: vec3<f32>,
+    skip_levels: u32,
+    skip_cell: vec3<f32>,
+    skip_padding: f32,
 };
 
 struct Shape {
@@ -70,12 +74,14 @@ const MODE_DEBOSS: u32 = 7u;
 const MODE_SHELL: u32 = 8u;
 
 const GRID_CELL_FULL: u32 = 4294967295u;
+const SKIP_RESOLUTION: u32 = 32u;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> render_params: RenderParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> shapes: array<Shape>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<storage, read> grid_cells: array<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> grid_indices: array<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<storage, read> lights: array<GpuLight>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<storage, read> skip_cells: array<u32>;
 
 const MAX_MARCH_STEPS: i32 = 128;
 const MAX_MARCH_DISTANCE: f32 = 100.0;

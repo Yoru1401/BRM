@@ -142,7 +142,8 @@ fn the_grid_never_reports_more_than_the_exact_field() {
             for _ in 0..60 {
                 let point = Vec3::new(spread!(12.0), spread!(12.0), spread!(12.0));
                 let exact = scene_distance(&shapes, point);
-                let gridded = scene_distance_gridded(&shapes, &grid, point);
+                let gridded =
+                    scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
                 assert!(
                     gridded <= exact + 1e-4,
                     "grid at resolution {resolution} reported {gridded} where the field is \
@@ -201,7 +202,8 @@ fn a_gridded_march_hits_what_the_exact_one_hits() {
         let (bounds_min, bounds_max) = scene_bounds(&shapes);
         let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
         let exact = |point| scene_distance(&shapes, point);
-        let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+        let gridded =
+            |point| scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
 
         for _ in 0..40 {
             let origin = Vec3::new(spread!(16.0), spread!(16.0), spread!(16.0));
@@ -256,7 +258,8 @@ fn a_long_ray_inside_the_grid_still_arrives() {
 
             let grid = build_grid(&shapes, GridWindow::covering(bounds_min, bounds_max, 16));
             let exact = |point| scene_distance(&shapes, point);
-            let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+            let gridded =
+                |point| scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
 
             let origin = Vec3::new(x, 0.0, 18.0);
             let direction = Vec3::new(0.0, 0.0, -1.0);
@@ -319,7 +322,7 @@ fn a_body_outside_the_grid_still_lowers_the_field() {
 
     let beside_the_body = Vec3::new(0.0, 4.4, 0.0);
     let exact = scene_distance(&shapes, beside_the_body);
-    let gridded = scene_distance_gridded(&shapes, &grid, beside_the_body);
+    let gridded = scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), beside_the_body);
 
     assert!(
         exact < 0.7,
@@ -380,7 +383,7 @@ fn bodies_outside_the_grid_never_report_more_than_the_exact_field() {
         for _ in 0..80 {
             let point = Vec3::new(spread!(5.0), 0.5 + next() * 4.5, spread!(5.0));
             let exact = scene_distance(&shapes, point);
-            let gridded = scene_distance_gridded(&shapes, &grid, point);
+            let gridded = scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
             assert!(
                 gridded <= exact + 1e-4,
                 "grid reported {gridded} where the field is {exact}, at {point:?}",
@@ -408,7 +411,7 @@ fn a_march_past_bodies_outside_the_grid_hits_what_the_exact_one_hits() {
     let (bounds_min, bounds_max) = scene_bounds(&statics);
     let grid = build_grid(&statics, GridWindow::covering(bounds_min, bounds_max, 16));
     let exact = |point| scene_distance(&shapes, point);
-    let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+    let gridded = |point| scene_distance_gridded(&shapes, &grid, &SkipPyramid::default(), point);
 
     let mut compared = 0;
     for step in 0..24 {

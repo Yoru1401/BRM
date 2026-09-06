@@ -9,5 +9,6 @@ mod input;
 mod lighting;
 mod physics;
 mod rebuild_cost;
+mod skip;
 mod static_changes;
 mod window;

@@ -6,4 +6,4 @@ pub mod screenshot;
 #[cfg(test)]
 mod tests;
 
-pub(crate) const SHADER_WARMUP: Duration = Duration::from_secs(3);
+pub(crate) const SHADER_WARMUP: Duration = Duration::from_secs(6);

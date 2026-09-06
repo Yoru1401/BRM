@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use super::helpers::*;
 use crate::sdf::brush::Modifiers;
-use crate::sdf::grid::{GRID_MAX_RESOLUTION, GridWindow, build_grid};
+use crate::sdf::grid::{GRID_MAX_RESOLUTION, GridWindow, SkipPyramid, build_grid};
 
 fn settings(cell_size: f32, resolution: u32) -> (f32, u32) {
     (cell_size, resolution)
@@ -124,7 +124,12 @@ fn a_window_that_excludes_geometry_still_never_overshoots() {
         for _ in 0..400 {
             let point = eye + Vec3::new(spread!(18.0), spread!(18.0), spread!(18.0));
             let exact = crate::sdf::field::scene_distance(&shapes, point);
-            let gridded = crate::sdf::grid::scene_distance_gridded(&shapes, &grid, point);
+            let gridded = crate::sdf::grid::scene_distance_gridded(
+                &shapes,
+                &grid,
+                &SkipPyramid::default(),
+                point,
+            );
             assert!(
                 gridded <= exact + 1e-4,
                 "window at {eye:?} reported {gridded} where the field is {exact}, at {point:?}",
