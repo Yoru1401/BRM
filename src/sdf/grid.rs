@@ -45,6 +45,8 @@ pub(crate) struct SdfGrid {
 
     pub(crate) cells: Vec<u32>,
     pub(crate) indices: Vec<u32>,
+
+    pub(crate) indexed: usize,
 }
 
 #[allow(dead_code)]
@@ -110,6 +112,7 @@ pub(crate) fn build_grid(
         resolution,
         cells: vec![0; cells_total * 2],
         indices: Vec::new(),
+        indexed: shapes.len(),
     };
     if shapes.is_empty() {
         return grid;
@@ -219,10 +222,22 @@ pub(crate) fn scene_distance_gridded(
         evaluated += 1;
     }
 
-    if count as usize == shapes.len() {
-        return field;
+    if count as usize != grid.indexed {
+        field = field.min(grid.exit_distance(world_point));
     }
-    field.min(grid.exit_distance(world_point))
+    fold_unindexed(shapes, grid.indexed, world_point, field)
+}
+
+fn fold_unindexed(shapes: &[GpuShape], indexed: usize, world_point: Vec3, mut field: f32) -> f32 {
+    for (offset, shape) in shapes[indexed.min(shapes.len())..].iter().enumerate() {
+        let distance = shape_distance(shape, world_point);
+        field = if indexed == 0 && offset == 0 {
+            distance
+        } else {
+            blend(distance, field, &shape.blend, shape.blend.chamfer != 0)
+        };
+    }
+    field
 }
 
 #[allow(dead_code)]
@@ -256,12 +271,15 @@ pub(crate) fn shadow_proxy_distance(shapes: &[GpuShape], grid: &SdfGrid, world_p
     }
 
     let offset = grid.cells[cell * 2] as usize;
-    let field = (0..count as usize)
+    let mut field = (0..count as usize)
         .map(|slot| bound(&shapes[grid.indices[offset + slot] as usize]))
         .fold(MAX_MARCH_DISTANCE, f32::min);
 
-    if count as usize == shapes.len() {
-        return field;
+    if count as usize != grid.indexed {
+        field = field.min(grid.exit_distance(world_point));
     }
-    field.min(grid.exit_distance(world_point))
+    shapes[grid.indexed.min(shapes.len())..]
+        .iter()
+        .map(bound)
+        .fold(field, f32::min)
 }

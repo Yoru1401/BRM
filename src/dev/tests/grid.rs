@@ -276,3 +276,149 @@ fn a_long_ray_inside_the_grid_still_arrives() {
         }
     }
 }
+
+fn body_at(position: Vec3, radius: f32) -> GpuShape {
+    shaped(
+        Transform::from_translation(position).with_scale(Vec3::splat(radius)),
+        Modifiers {
+            round: 1.0,
+            ..default()
+        },
+    )
+}
+
+fn a_room() -> Vec<GpuShape> {
+    [
+        Vec3::new(0.0, -2.0, 0.0),
+        Vec3::new(-6.0, 1.0, 0.0),
+        Vec3::new(6.0, 1.0, 0.0),
+        Vec3::new(0.0, 1.0, -6.0),
+    ]
+    .into_iter()
+    .map(|position| {
+        shaped(
+            Transform::from_translation(position).with_scale(Vec3::new(6.0, 1.0, 6.0)),
+            Modifiers::default(),
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn a_body_outside_the_grid_still_lowers_the_field() {
+    let statics = a_room();
+    let mut shapes = statics.clone();
+    shapes.push(body_at(Vec3::new(0.0, 3.0, 0.0), 0.8));
+
+    let (bounds_min, bounds_max) = scene_bounds(&statics);
+    let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+    assert_eq!(grid.indexed, statics.len());
+
+    let beside_the_body = Vec3::new(0.0, 4.4, 0.0);
+    let exact = scene_distance(&shapes, beside_the_body);
+    let gridded = scene_distance_gridded(&shapes, &grid, beside_the_body);
+
+    assert!(
+        exact < 0.7,
+        "the probe point should be near the body, field is {exact}"
+    );
+    assert!(
+        gridded <= exact + 1e-4,
+        "grid reported {gridded} where the field is {exact}: the body was never folded",
+    );
+}
+
+#[test]
+fn a_moving_body_leaves_the_static_grid_untouched() {
+    let statics = a_room();
+    let (bounds_min, bounds_max) = scene_bounds(&statics);
+    let before = build_grid(&statics, bounds_min, bounds_max, 16);
+
+    for height in [3.0, 2.0, 1.0, 0.5] {
+        let mut shapes = statics.clone();
+        shapes.push(body_at(Vec3::new(0.3, height, -0.4), 0.8));
+        let after = build_grid(&shapes[..statics.len()], bounds_min, bounds_max, 16);
+        assert_eq!(before, after, "the grid moved when only a body did");
+    }
+}
+
+#[test]
+fn bodies_outside_the_grid_never_report_more_than_the_exact_field() {
+    let mut state = 0x51ED_2701_A93C_0F17u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 40) as f32 / 16777216.0
+    };
+    macro_rules! spread {
+        ($scale:expr) => {
+            (next() - 0.5) * 2.0 * $scale
+        };
+    }
+
+    let mut near_a_body = 0;
+    for _ in 0..40 {
+        let statics = a_room();
+        let mut shapes = statics.clone();
+        for _ in 0..1 + (next() * 4.0) as usize {
+            shapes.push(body_at(
+                Vec3::new(spread!(5.0), 0.5 + next() * 4.0, spread!(5.0)),
+                0.3 + next() * 0.6,
+            ));
+        }
+
+        let (bounds_min, bounds_max) = scene_bounds(&statics);
+        let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+
+        for _ in 0..80 {
+            let point = Vec3::new(spread!(5.0), 0.5 + next() * 4.5, spread!(5.0));
+            let exact = scene_distance(&shapes, point);
+            let gridded = scene_distance_gridded(&shapes, &grid, point);
+            assert!(
+                gridded <= exact + 1e-4,
+                "grid reported {gridded} where the field is {exact}, at {point:?}",
+            );
+            if exact < scene_distance(&statics, point) - 1e-3 {
+                near_a_body += 1;
+            }
+        }
+    }
+
+    assert!(
+        near_a_body > 200,
+        "only {near_a_body} samples were nearer a body than the statics, so the assertion \
+         above could pass without the bodies ever mattering",
+    );
+}
+
+#[test]
+fn a_march_past_bodies_outside_the_grid_hits_what_the_exact_one_hits() {
+    let statics = a_room();
+    let mut shapes = statics.clone();
+    shapes.push(body_at(Vec3::new(0.0, 2.5, 0.0), 1.0));
+    shapes.push(body_at(Vec3::new(-2.5, 2.0, 1.5), 0.7));
+
+    let (bounds_min, bounds_max) = scene_bounds(&statics);
+    let grid = build_grid(&statics, bounds_min, bounds_max, 16);
+    let exact = |point| scene_distance(&shapes, point);
+    let gridded = |point| scene_distance_gridded(&shapes, &grid, point);
+
+    let mut compared = 0;
+    for step in 0..24 {
+        let angle = step as f32 * std::f32::consts::TAU / 24.0;
+        let origin = Vec3::new(angle.cos() * 14.0, 2.4, angle.sin() * 14.0);
+        let direction = (Vec3::new(0.0, 2.4, 0.0) - origin).normalize();
+        if exact(origin) < 0.0 {
+            continue;
+        }
+        let (hit, _) = march(&exact, &exact, origin, direction, 1.2, 0.01, 128);
+        let (grid_hit, _) = march(&gridded, &exact, origin, direction, 1.2, 0.01, 128);
+        assert!(
+            (hit - grid_hit).abs() < 0.05,
+            "at angle {angle}: exact stopped at {hit}, gridded at {grid_hit}",
+        );
+        compared += 1;
+    }
+    assert!(compared > 20, "only {compared} rays ran");
+}

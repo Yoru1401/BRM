@@ -42,6 +42,14 @@ impl SdfScene {
     }
 }
 
+pub(crate) type StaticBrushQuery = (
+    &'static Brush,
+    Ref<'static, GlobalTransform>,
+    Option<Ref<'static, Modifiers>>,
+    Option<Ref<'static, CsgOperation>>,
+    Option<Ref<'static, Albedo>>,
+);
+
 type BrushQuery = (
     &'static Brush,
     &'static GlobalTransform,
@@ -65,7 +73,7 @@ fn pack_queried_brush(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_shapes_to_gpu(
     world: Single<&Children, With<SdfWorld>>,
-    statics: Query<BrushQuery>,
+    statics: Query<StaticBrushQuery>,
     bodies: Query<BrushQuery, With<SphereBody>>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     mut materials: ResMut<Assets<SdfMaterial>>,
@@ -73,60 +81,102 @@ pub(crate) fn sync_shapes_to_gpu(
     mut scene: ResMut<SdfScene>,
     settings: Res<GridSettings>,
 ) {
-    let (packed, static_count) = collect_brushes(&world, &statics, &bodies);
-
-    if packed == scene.shapes && !settings.is_changed() {
+    let statics_moved =
+        settings.is_changed() || static_brushes_changed(&world, &statics, scene.static_count);
+    let packed_bodies = collect_bodies(&bodies);
+    if !statics_moved && packed_bodies == scene.shapes[scene.static_count..] {
         return;
     }
-    scene.shapes = packed;
-    scene.static_count = static_count;
 
     let Some(mut material) = materials.get_mut(&quad.0) else {
         return;
     };
-    let (bounds_min, bounds_max) = scene_bounds(&scene.shapes);
-    let grid = build_grid(&scene.shapes, bounds_min, bounds_max, settings.resolution);
+
+    if statics_moved {
+        let packed = collect_statics(&world, &statics);
+        scene.static_count = packed.len();
+        scene.shapes = packed;
+    } else {
+        let unchanged = scene.static_count;
+        scene.shapes.truncate(unchanged);
+    }
+    scene.shapes.extend(packed_bodies);
+    drop_overflowing_brushes(&mut scene);
+
+    let bounds = scene_bounds(&scene.shapes);
+    scene.grid = build_grid(&scene.shapes, bounds.0, bounds.1, settings.resolution);
     describe_scene_to_shader(
         &mut material.render_params,
         &scene.shapes,
-        (bounds_min, bounds_max),
-        &grid,
+        bounds,
+        &scene.grid,
         &settings,
     );
 
-    let (shape_buffer, cell_buffer, index_buffer) = (
+    let (shapes, cells, indices) = (
         material.shapes.clone(),
         material.grid_cells.clone(),
         material.grid_indices.clone(),
     );
-    upload_padded(&mut buffers, &shape_buffer, &scene.shapes, MAX_SHAPES);
-    upload_padded(&mut buffers, &cell_buffer, &grid.cells, GRID_CELL_WORDS);
-    upload_padded(&mut buffers, &index_buffer, &grid.indices, GRID_INDEX_WORDS);
-    scene.grid = grid;
+    upload_padded(&mut buffers, &shapes, &scene.shapes, MAX_SHAPES);
+    upload_padded(&mut buffers, &cells, &scene.grid.cells, GRID_CELL_WORDS);
+    upload_padded(
+        &mut buffers,
+        &indices,
+        &scene.grid.indices,
+        GRID_INDEX_WORDS,
+    );
 }
 
-fn collect_brushes(
+pub(crate) fn static_brushes_changed(
     world: &Children,
-    statics: &Query<BrushQuery>,
-    bodies: &Query<BrushQuery, With<SphereBody>>,
-) -> (Vec<GpuShape>, usize) {
-    let mut packed: Vec<GpuShape> = world
+    statics: &Query<StaticBrushQuery>,
+    counted_before: usize,
+) -> bool {
+    let mut count = 0;
+    let mut moved = false;
+    for brush in world.iter() {
+        let Ok((_, placement, modifiers, operation, albedo)) = statics.get(brush) else {
+            continue;
+        };
+        count += 1;
+        moved |= placement.is_changed()
+            || modifiers.is_some_and(|value| value.is_changed())
+            || operation.is_some_and(|value| value.is_changed())
+            || albedo.is_some_and(|value| value.is_changed());
+    }
+    moved || count != counted_before
+}
+
+fn collect_statics(world: &Children, statics: &Query<StaticBrushQuery>) -> Vec<GpuShape> {
+    world
         .iter()
         .filter_map(|brush| statics.get(brush).ok())
-        .map(pack_queried_brush)
-        .collect();
-    let mut static_count = packed.len();
-    packed.extend(bodies.iter().map(pack_queried_brush));
+        .map(|(_, placement, modifiers, operation, albedo)| {
+            pack_brush(
+                &placement,
+                modifiers.as_deref(),
+                operation.as_deref(),
+                albedo.as_deref(),
+            )
+        })
+        .collect()
+}
 
-    if packed.len() > MAX_SHAPES {
-        warn!(
-            "scene has {} brushes, buffer holds {MAX_SHAPES}; the rest are dropped",
-            packed.len()
-        );
-        packed.truncate(MAX_SHAPES);
-        static_count = static_count.min(MAX_SHAPES);
+fn collect_bodies(bodies: &Query<BrushQuery, With<SphereBody>>) -> Vec<GpuShape> {
+    bodies.iter().map(pack_queried_brush).collect()
+}
+
+fn drop_overflowing_brushes(scene: &mut SdfScene) {
+    if scene.shapes.len() <= MAX_SHAPES {
+        return;
     }
-    (packed, static_count)
+    warn!(
+        "scene has {} brushes, buffer holds {MAX_SHAPES}; the rest are dropped",
+        scene.shapes.len()
+    );
+    scene.shapes.truncate(MAX_SHAPES);
+    scene.static_count = scene.static_count.min(MAX_SHAPES);
 }
 
 fn describe_scene_to_shader(

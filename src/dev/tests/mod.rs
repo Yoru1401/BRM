@@ -9,3 +9,4 @@ mod input;
 mod lighting;
 mod physics;
 mod rebuild_cost;
+mod static_changes;

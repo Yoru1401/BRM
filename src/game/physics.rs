@@ -53,8 +53,6 @@ const SLEEP_SPIN: f32 = 0.15;
 
 const SLEEP_CLEARANCE: f32 = 0.02;
 
-const BODY_ALBEDO: Vec3 = Vec3::new(0.95, 0.85, 0.25);
-
 const KILL_BELOW: f32 = -50.0;
 
 fn static_field_is_ready(scene: Res<SdfScene>) -> bool {
