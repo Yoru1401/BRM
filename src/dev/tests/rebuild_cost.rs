@@ -66,7 +66,8 @@ fn pad<T: Clone + Default>(values: &[T], capacity: usize) -> Vec<T> {
 #[ignore = "timing probe, run explicitly"]
 fn what_a_rebuild_costs() {
     println!(
-        "\nshapes\tcarved\tcells\tentries\tbounds\tbuild\tpad_shapes\tpad_cells\tpad_indices\ttotal"
+        "\nshapes\tcarved\tcells\tentries\tbounds\tbuild\tpad_shapes\tpad_cells\tpad_indices\t\
+         set_shapes\tset_cells\tset_indices\ttotal"
     );
     for (count, carved) in [(8, 2), (32, 4), (128, 8), (256, 16)] {
         let shapes = scene_of(count, carved);
