@@ -1,7 +1,4 @@
-use bevy::{
-    prelude::*,
-    window::{PresentMode, WindowResolution},
-};
+use bevy::prelude::*;
 
 use crate::command_line;
 use crate::game::scenes::SdfWorld;
@@ -79,17 +76,6 @@ impl Plugin for BenchmarkPlugin {
             .add_systems(Startup, (spawn_bench_scene, spawn_bench_lights))
             .add_systems(PostUpdate, park_camera)
             .add_systems(Update, record);
-    }
-}
-
-pub(crate) fn bench_window() -> Window {
-    let width = command_line::value("--width").unwrap_or(1280.0) as u32;
-    let height = command_line::value("--height").unwrap_or(720.0) as u32;
-    Window {
-        present_mode: PresentMode::Immediate,
-        resolution: WindowResolution::new(width, height),
-        title: "IDK bench".into(),
-        ..default()
     }
 }
 
