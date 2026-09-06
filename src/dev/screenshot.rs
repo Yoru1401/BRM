@@ -3,6 +3,7 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use std::path::PathBuf;
 
 use crate::command_line;
+use crate::dev::SHADER_WARMUP;
 
 const SETTLE_FRAMES: usize = 240;
 
@@ -32,16 +33,26 @@ struct ShotPath(PathBuf);
 fn capture(
     mut commands: Commands,
     path: Res<ShotPath>,
-    mut frame: Local<usize>,
+    time: Res<Time>,
+    mut settled: Local<usize>,
+    mut draining: Local<Option<usize>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    *frame += 1;
-    if *frame == SETTLE_FRAMES {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path.0.clone()));
+    if let Some(left) = draining.as_mut() {
+        if *left == 0 {
+            exit.write(AppExit::Success);
+        } else {
+            *left -= 1;
+        }
+        return;
     }
-    if *frame >= SETTLE_FRAMES + DRAIN_FRAMES {
-        exit.write(AppExit::Success);
+
+    *settled += 1;
+    if *settled < SETTLE_FRAMES || time.elapsed() < SHADER_WARMUP {
+        return;
     }
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path.0.clone()));
+    *draining = Some(DRAIN_FRAMES);
 }

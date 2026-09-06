@@ -209,6 +209,10 @@ fn record(
     materials: Res<Assets<SdfMaterial>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    if time.elapsed() < crate::dev::SHADER_WARMUP {
+        frames.times.clear();
+        return;
+    }
     frames.times.push(time.delta_secs() * 1000.0);
 
     let block = RECORDED_FRAMES + if frames.done == 0 { WARMUP_FRAMES } else { 0 };
