@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::game::physics::{SphereBody, contact_friction, swept};
-use crate::sdf::adf::{self, Adf};
+use crate::sdf::adf::{self, Adf, BIAS_VOXELS, Surface};
 
 const STEP: f32 = 1.0 / 256.0;
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -10,13 +10,13 @@ const TOP: f32 = 2.0;
 fn slab() -> Adf {
     let mut mesh = Mesh::from(Cuboid::new(24.0, 4.0, 24.0));
     mesh.duplicate_vertices();
-    let mut triangles = adf::triangles_of(&mesh);
+    let mut triangles = adf::triangles_of(&mesh).0;
     for triangle in triangles.iter_mut() {
         for corner in triangle.iter_mut() {
             corner.y += TOP - 2.0;
         }
     }
-    adf::bake(&triangles)
+    adf::bake(&Surface::new(&triangles, &[], &[]))
 }
 
 fn drop_ball(field: &Adf, radius: f32, from: f32, ticks: usize) -> (Vec3, Vec3) {
@@ -60,7 +60,7 @@ fn a_dropped_sphere_rests_one_radius_above_the_slab() {
     let (position, velocity) = drop_ball(&field, radius, TOP + 6.0, 2000);
 
     let hover = position.y - TOP;
-    let bias = 0.5 * 3f32.sqrt() * field.voxel;
+    let bias = field.voxel * BIAS_VOXELS;
     assert!(
         (hover - radius - bias).abs() < field.voxel,
         "rested {hover} above the slab; wanted radius {radius} plus the {bias} bake bias"

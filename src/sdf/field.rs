@@ -7,8 +7,9 @@ use bevy::{
 };
 
 use crate::command_line;
-use crate::sdf::adf::{self, Adf};
+use crate::sdf::adf::{self, Adf, Material, Surface};
 use crate::sdf::render::{MainCamera, SdfMaterial, spawn_quad};
+use crate::sdf::solid::{Shape, Solid};
 
 pub(crate) struct FieldPlugin;
 
@@ -24,24 +25,70 @@ const MODEL_SIZE: f32 = 1000.0;
 const PLAY_SIZE: f32 = 200.0;
 
 #[derive(Resource)]
-struct Pending(Handle<Mesh>);
+struct Pending {
+    mesh: Handle<Mesh>,
+    marks: Vec<u8>,
+    parts: Vec<u16>,
+    solids: Vec<Solid>,
+}
 
 fn request_model(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let handle = match command_line::text("--model") {
-        Some(path) => assets.load(
-            GltfAssetLabel::Primitive {
-                mesh: 0,
-                primitive: 0,
+    let pending = match command_line::text("--model") {
+        Some(path) => Pending {
+            mesh: assets.load(
+                GltfAssetLabel::Primitive {
+                    mesh: 0,
+                    primitive: 0,
+                }
+                .from_asset(path),
+            ),
+            marks: Vec::new(),
+            parts: Vec::new(),
+            solids: Vec::new(),
+        },
+        None => {
+            let (mesh, marks, parts, solids) = placeholder();
+            Pending {
+                mesh: meshes.add(mesh),
+                marks,
+                parts,
+                solids,
             }
-            .from_asset(path),
-        ),
-        None => meshes.add(placeholder()),
+        }
     };
-    commands.insert_resource(Pending(handle));
+    commands.insert_resource(pending);
+}
+
+pub(crate) const MATERIAL_TERRAIN: u32 = 0;
+pub(crate) const MATERIAL_STONE: u32 = 1;
+pub(crate) const MATERIAL_METAL: u32 = 2;
+pub(crate) const MATERIAL_CHALK: u32 = 3;
+pub(crate) const MATERIAL_CLAY: u32 = 4;
+pub(crate) const MATERIAL_GLASS: u32 = 5;
+pub(crate) const MATERIAL_BODY: u32 = 6;
+pub(crate) const MATERIAL_PLAYER: u32 = 7;
+
+fn world_palette() -> Vec<Material> {
+    [
+        ([0.42, 0.46, 0.35], 0.02),
+        ([0.62, 0.60, 0.57], 0.10),
+        ([0.55, 0.57, 0.62], 0.85),
+        ([0.88, 0.86, 0.80], 0.05),
+        ([0.72, 0.42, 0.28], 0.15),
+        ([0.45, 0.62, 0.68], 0.65),
+        ([0.90, 0.35, 0.18], 0.30),
+        ([0.95, 0.82, 0.25], 0.40),
+    ]
+    .iter()
+    .map(|(albedo, gloss)| Material {
+        albedo: Vec3::from(*albedo),
+        gloss: *gloss,
+    })
+    .collect()
 }
 
 const TERRAIN_QUADS: usize = 192;
@@ -131,10 +178,16 @@ fn terrain() -> Mesh {
     mesh
 }
 
-fn placeholder() -> Mesh {
-    let mut world = terrain();
-    let mut add = |part: Mesh, placement: Transform| {
-        let _ = world.merge(&part.transformed_by(placement));
+fn placeholder() -> (Mesh, Vec<u8>, Vec<u16>, Vec<Solid>) {
+    let world = terrain();
+    let marks: Vec<u8> = vec![MATERIAL_TERRAIN as u8; triangle_count(&world)];
+    let parts: Vec<u16> = vec![0; marks.len()];
+
+    let mut solids: Vec<Solid> = Vec::new();
+    let mut next_part = 1u16;
+    let mut plant = |shape: Shape, centre: Vec3, turn: Quat, material: u32| {
+        solids.push(Solid::new(shape, centre, turn, material as u8, next_part));
+        next_part = next_part.wrapping_add(1);
     };
 
     let mut seed = 0x9e37_79b9u32;
@@ -149,35 +202,47 @@ fn placeholder() -> Mesh {
         let x = (random() - 0.5) * TERRAIN_HALF * 1.9;
         let z = (random() - 0.5) * TERRAIN_HALF * 1.9;
         let floor = ground(x, z);
-        let scale = 0.6 + random() * random() * 4.0;
+        let scale = 1.3 + random() * random() * 3.4;
 
         match index % 5 {
             0 | 1 => {
                 let height = 6.0 * scale;
-                add(
-                    Mesh::from(Cuboid::new(4.0 * scale, height, 4.0 * scale)),
-                    Transform::from_xyz(x, floor + height * 0.4, z)
-                        .with_rotation(Quat::from_rotation_y(random() * 3.0)),
+                plant(
+                    Shape::Box {
+                        half: Vec3::new(2.0 * scale, height * 0.5, 2.0 * scale),
+                    },
+                    Vec3::new(x, floor + height * 0.4, z),
+                    Quat::from_rotation_y(random() * 3.0),
+                    MATERIAL_STONE,
                 );
             }
             2 => {
                 let height = 10.0 * scale;
-                add(
-                    Cylinder::new(1.4 * scale, height).mesh().resolution(20).build(),
-                    Transform::from_xyz(x, floor + height * 0.35, z),
+                plant(
+                    Shape::Cylinder {
+                        radius: 1.4 * scale,
+                        half_height: height * 0.5,
+                    },
+                    Vec3::new(x, floor + height * 0.35, z),
+                    Quat::IDENTITY,
+                    MATERIAL_METAL,
                 );
             }
-            3 => add(
-                Sphere::new(2.5 * scale).mesh().ico(3).unwrap(),
-                Transform::from_xyz(x, floor + 1.2 * scale, z),
+            3 => plant(
+                Shape::Sphere { radius: 2.5 * scale },
+                Vec3::new(x, floor + 1.2 * scale, z),
+                Quat::IDENTITY,
+                MATERIAL_CHALK,
             ),
-            _ => add(
-                Mesh::from(ConicalFrustum {
-                    radius_top: 0.5 * scale,
-                    radius_bottom: 3.0 * scale,
-                    height: 8.0 * scale,
-                }),
-                Transform::from_xyz(x, floor + 3.0 * scale, z),
+            _ => plant(
+                Shape::Frustum {
+                    top: 0.5 * scale,
+                    bottom: 3.0 * scale,
+                    half_height: 4.0 * scale,
+                },
+                Vec3::new(x, floor + 3.0 * scale, z),
+                Quat::IDENTITY,
+                MATERIAL_CLAY,
             ),
         }
     }
@@ -185,17 +250,21 @@ fn placeholder() -> Mesh {
     for slot in 0..4 {
         let turn = slot as f32 / 4.0 * std::f32::consts::TAU;
         let (x, z) = (turn.cos() * 60.0, turn.sin() * 60.0);
-        add(
-            Torus::new(2.0, 12.0)
-                .mesh()
-                .major_resolution(48)
-                .minor_resolution(16)
-                .build(),
-            Transform::from_xyz(x, ground(x, z) + 10.0, z)
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        plant(
+            Shape::Torus {
+                major: 7.0,
+                minor: 5.0,
+            },
+            Vec3::new(x, ground(x, z) + 10.0, z),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            MATERIAL_GLASS,
         );
     }
-    world
+    (world, marks, parts, solids)
+}
+
+fn triangle_count(mesh: &Mesh) -> usize {
+    mesh.indices().map_or(0, |list| list.len() / 3)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -209,10 +278,19 @@ fn bake_when_ready(
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut adf: ResMut<Adf>,
 ) {
-    let Some(mesh) = meshes.get(&pending.0) else {
+    let Some(mesh) = meshes.get(&pending.mesh) else {
         return;
     };
-    let mut triangles = adf::triangles_of(mesh);
+    let (mut triangles, sources) = adf::triangles_of(mesh);
+    let marks: Vec<u8> = sources
+        .iter()
+        .map(|source| pending.marks.get(*source as usize).copied().unwrap_or(0))
+        .collect();
+    let parts: Vec<u16> = sources
+        .iter()
+        .map(|source| pending.parts.get(*source as usize).copied().unwrap_or(0))
+        .collect();
+    let mut solids = pending.solids.clone();
     commands.remove_resource::<Pending>();
     if triangles.is_empty() {
         error!("model has no triangles; nothing to bake");
@@ -221,22 +299,25 @@ fn bake_when_ready(
 
     adf::fit(
         &mut triangles,
+        &mut solids,
         command_line::value("--size").unwrap_or(match command_line::flag("--play") {
             true => PLAY_SIZE,
             false => MODEL_SIZE,
         }),
     );
     let started = std::time::Instant::now();
-    *adf = adf::bake(&triangles);
+    *adf = adf::bake(&Surface::new(&triangles, &marks, &parts).with_solids(&solids));
+    adf.palette = world_palette();
     let (low, high) = adf.bounds();
     info!(
-        "adf: {} triangles, {} bricks of {}, {:.3} m voxels, {} m across, {} MB atlas, {} MB page, baked in {:.2} s",
+        "adf: {} triangles, {} bricks of {}, {:.3} m voxels, {} m across, {} MB atlas, {} MB paint, {} MB page, baked in {:.2} s",
         triangles.len(),
         adf.used,
         adf::brick_budget(),
         adf.voxel,
         (high - low).max_element().round(),
         adf.atlas.len() >> 20,
+        adf.paint.len() >> 20,
         (adf.page.len() * 4) >> 20,
         started.elapsed().as_secs_f32()
     );
@@ -258,6 +339,8 @@ fn viewpoint(adf: &Adf) -> Transform {
     let (low, high) = adf.bounds();
     let centre = (low + high) * 0.5;
     let reach = (high - low).max_element();
-    Transform::from_translation(centre + Vec3::new(0.0, reach * 0.35, reach * 0.8))
-        .looking_at(centre, Vec3::Y)
+    let eye = command_line::triple("--eye")
+        .map_or(centre + Vec3::new(0.0, reach * 0.35, reach * 0.8), Vec3::from);
+    let look = command_line::triple("--look").map_or(centre, Vec3::from);
+    Transform::from_translation(eye).looking_at(look, Vec3::Y)
 }

@@ -20,3 +20,14 @@ pub(crate) fn text(name: &str) -> Option<String> {
 pub(crate) fn positional(index: usize) -> Option<String> {
     std::env::args().nth(index + 1)
 }
+
+pub(crate) fn triple(name: &str) -> Option<[f32; 3]> {
+    let arguments: Vec<String> = std::env::args().collect();
+    let at = arguments.iter().position(|argument| argument == name)?;
+    let mut read = arguments.get(at + 1..at + 4)?.iter().map(|word| word.parse());
+    Some([
+        read.next()?.ok()?,
+        read.next()?.ok()?,
+        read.next()?.ok()?,
+    ])
+}

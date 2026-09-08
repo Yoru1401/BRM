@@ -5,6 +5,7 @@ use crate::game::physics::SphereBody;
 use crate::sdf::adf::Adf;
 use crate::sdf::dynamic::Dynamic;
 use crate::sdf::light::{Light, LightKind};
+use crate::sdf::field::MATERIAL_BODY;
 
 pub(crate) struct ScenePlugin;
 
@@ -89,7 +90,7 @@ fn populate(mut commands: Commands, field: Res<Adf>) {
         );
         commands.spawn((
             SphereBody { radius, ..default() },
-            Dynamic::ball(place, radius),
+            Dynamic::ball(place, radius, MATERIAL_BODY),
             Transform::from_translation(place),
         ));
     }

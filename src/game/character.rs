@@ -8,6 +8,7 @@ use crate::game::input::{Action, Fly};
 use crate::game::physics::{Tuning, swept};
 use crate::sdf::adf::Adf;
 use crate::sdf::dynamic::Dynamic;
+use crate::sdf::field::MATERIAL_PLAYER;
 use crate::sdf::render::MainCamera;
 
 pub(crate) fn playing() -> bool {
@@ -18,6 +19,10 @@ pub(crate) struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
+        if command_line::triple("--eye").is_some() {
+            app.init_resource::<Orbit>();
+            return;
+        }
         app.init_resource::<Orbit>()
             .add_systems(
                 Update,
@@ -124,7 +129,7 @@ fn spawn_character(mut commands: Commands, field: Res<Adf>) {
     info!("character: standing at {:?}", Vec3::new(above.x, stand, above.z));
     commands.spawn((
         Character::default(),
-        Dynamic::ball(Vec3::new(above.x, stand, above.z), RADIUS),
+        Dynamic::ball(Vec3::new(above.x, stand, above.z), RADIUS, MATERIAL_PLAYER),
         Transform::from_xyz(above.x, stand, above.z),
     ));
 }
@@ -201,11 +206,7 @@ fn drive_character(
 
     let half = (HEIGHT - 2.0 * RADIUS) * 0.5;
     let up = character.orientation * Vec3::Y * half;
-    *shape = Dynamic {
-        start: position - up,
-        end: position + up,
-        radius: RADIUS,
-    };
+    *shape = Dynamic::rod(position - up, position + up, RADIUS, MATERIAL_PLAYER);
 }
 
 pub(crate) fn step_character(

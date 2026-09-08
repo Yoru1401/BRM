@@ -1,4 +1,5 @@
-#import "shaders/bindings.wgsl"::{APRON, BRICK, CLEARANCE_MASK, Dynamic, NORMAL_TAP, RANGE_VOXELS, SPAN, TAG_SHIFT, TAG_SOLID, atlas, atlas_sampler, dynamics, page, render_params}
+#import idk::shapes::{shape_distance, shape_normal}
+#import "shaders/bindings.wgsl"::{APRON, BRICK, Dynamic, NORMAL_TAP, RANGE_VOXELS, SLOT_MASK, SPAN, TAG_SHIFT, TAG_SOLID, atlas, atlas_sampler, coarse, dynamics, page, paint, paint_sampler, render_params}
 
 fn adf_low() -> vec3<f32> {
     return render_params.origin;
@@ -33,60 +34,54 @@ fn baked_probe(world_position: vec3<f32>) -> vec2<f32> {
     }
 
     let cell = clamp(floor(local), vec3<f32>(0.0), last);
-    let word = page[u32(cell.x)
+    let index = u32(cell.x)
         + u32(cell.y) * render_params.bricks.x
-        + u32(cell.z) * render_params.bricks.x * render_params.bricks.y];
+        + u32(cell.z) * render_params.bricks.x * render_params.bricks.y;
+    let word = page[index];
     let tag = word >> TAG_SHIFT;
+    let range = render_params.voxel * RANGE_VOXELS;
 
     if tag >= TAG_SOLID {
         let low = render_params.origin + cell * size;
         let gap = min(world_position - low, low + vec3<f32>(size) - world_position);
-        let clearance = f32(max(word & CLEARANCE_MASK, 1u) - 1u);
-        let reach = max(min(gap.x, min(gap.y, gap.z)), 0.0)
-            + clearance * size
-            + render_params.voxel * RANGE_VOXELS;
+        let reach = max(min(gap.x, min(gap.y, gap.z)), 0.0) + coarse[index] + range;
         if tag == TAG_SOLID {
             return vec2<f32>(-reach, 0.0);
         }
         return vec2<f32>(reach, 0.0);
     }
-    let slot = word;
 
     let inside = clamp(local - cell, vec3<f32>(0.0), vec3<f32>(1.0)) * f32(BRICK) + f32(APRON);
-    let uvw = (slot_origin(slot) + inside + vec3<f32>(0.5)) / render_params.atlas_side;
-    let range = render_params.voxel * RANGE_VOXELS;
+    let uvw = (slot_origin(word & SLOT_MASK) + inside + vec3<f32>(0.5)) / render_params.atlas_side;
     let unit = textureSampleLevel(atlas, atlas_sampler, uvw, 0.0).r;
-    let banded = f32(unit > 0.002 && unit < 0.998);
-    return vec2<f32>(unit * 2.0 * range - range, banded);
+    return vec2<f32>(unit * 2.0 * range - range, f32(unit > 0.002 && unit < 0.998));
 }
 
-fn capsule_distance(world_position: vec3<f32>, body: Dynamic) -> f32 {
-    let from_start = world_position - body.start;
-    let along = body.end - body.start;
-    let fraction = clamp(dot(from_start, along) / max(dot(along, along), 1e-8), 0.0, 1.0);
-    return length(from_start - along * fraction) - body.radius;
-}
-
-fn dynamic_distance(world_position: vec3<f32>) -> f32 {
-    var nearest = 1e30;
-    for (var index = 0u; index < render_params.dynamic_count; index++) {
-        nearest = min(nearest, capsule_distance(world_position, dynamics[index]));
+fn nearest_dynamic(world_position: vec3<f32>, ceiling: f32) -> vec2<f32> {
+    if render_params.dynamic_count == 0u {
+        return vec2<f32>(1e30, -1.0);
     }
-    return nearest;
+    let bound = render_params.dynamic_bound;
+    if length(world_position - bound.xyz) - bound.w >= ceiling {
+        return vec2<f32>(1e30, -1.0);
+    }
+    var nearest = 1e30;
+    var which = -1.0;
+    for (var index = 0u; index < render_params.dynamic_count; index++) {
+        let reach = shape_distance(world_position, dynamics[index]);
+        if reach < nearest {
+            nearest = reach;
+            which = f32(index);
+        }
+    }
+    return vec2<f32>(nearest, which);
 }
 
 fn adf_probe(world_position: vec3<f32>) -> vec2<f32> {
     let baked = baked_probe(world_position);
-    if render_params.dynamic_count == 0u {
-        return baked;
-    }
-    let bound = render_params.dynamic_bound;
-    if length(world_position - bound.xyz) - bound.w >= baked.x {
-        return baked;
-    }
-    let body = dynamic_distance(world_position);
-    if body < baked.x {
-        return vec2<f32>(body, 1.0);
+    let body = nearest_dynamic(world_position, baked.x);
+    if body.x < baked.x {
+        return vec2<f32>(body.x, 1.0);
     }
     return baked;
 }
@@ -95,14 +90,58 @@ fn adf_distance(world_position: vec3<f32>) -> f32 {
     return adf_probe(world_position).x;
 }
 
-fn surface_normal(surface_point: vec3<f32>) -> vec3<f32> {
-    let offset = vec2<f32>(1.0, -1.0) * render_params.voxel * NORMAL_TAP;
+fn baked_normal(surface_point: vec3<f32>) -> vec3<f32> {
+    let offset = vec2<f32>(1.0, -1.0) * render_params.voxel * NORMAL_TAP * 0.35;
     return normalize(
-        offset.xyy * adf_distance(surface_point + offset.xyy) +
-        offset.yyx * adf_distance(surface_point + offset.yyx) +
-        offset.yxy * adf_distance(surface_point + offset.yxy) +
-        offset.xxx * adf_distance(surface_point + offset.xxx)
+        offset.xyy * baked_probe(surface_point + offset.xyy).x +
+        offset.yyx * baked_probe(surface_point + offset.yyx).x +
+        offset.yxy * baked_probe(surface_point + offset.yxy).x +
+        offset.xxx * baked_probe(surface_point + offset.xxx).x
     );
+}
+
+fn surface_normal(surface_point: vec3<f32>) -> vec3<f32> {
+    let baked = baked_probe(surface_point).x;
+    let body = nearest_dynamic(surface_point, baked);
+    if body.y >= 0.0 && body.x < baked {
+        return shape_normal(surface_point, dynamics[u32(body.y)]);
+    }
+    return baked_normal(surface_point);
+}
+
+fn brick_cell(world_position: vec3<f32>) -> vec3<f32> {
+    let local = (world_position - render_params.origin) / render_params.brick_size;
+    return clamp(
+        floor(local),
+        vec3<f32>(0.0),
+        vec3<f32>(render_params.bricks) - vec3<f32>(1.0),
+    );
+}
+
+fn brick_word(world_position: vec3<f32>) -> u32 {
+    let cell = brick_cell(world_position);
+    return page[u32(cell.x)
+        + u32(cell.y) * render_params.bricks.x
+        + u32(cell.z) * render_params.bricks.x * render_params.bricks.y];
+}
+
+fn baked_material(world_position: vec3<f32>) -> u32 {
+    let word = brick_word(world_position);
+    if word >> TAG_SHIFT >= TAG_SOLID {
+        return 0u;
+    }
+    let slot = word & SLOT_MASK;
+    let side = render_params.slot_side;
+    let base = vec3<f32>(
+        f32(slot % side),
+        f32((slot / side) % side),
+        f32(slot / (side * side)),
+    ) * f32(BRICK);
+    let cell = brick_cell(world_position);
+    let local = (world_position - render_params.origin) / render_params.brick_size;
+    let inside = clamp(local - cell, vec3<f32>(0.0), vec3<f32>(0.9999)) * f32(BRICK);
+    let uvw = (base + floor(inside) + vec3<f32>(0.5)) / render_params.paint_side;
+    return u32(textureSampleLevel(paint, paint_sampler, uvw, 0.0).r * 255.0 + 0.5);
 }
 
 fn adf_span(ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec2<f32> {

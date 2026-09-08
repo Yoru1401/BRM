@@ -12,7 +12,7 @@ struct RenderParams {
     slot_side: u32,
     atlas_side: f32,
     dynamic_count: u32,
-    padding_one: u32,
+    paint_side: f32,
     padding_two: u32,
     padding_three: u32,
     dynamic_bound: vec4<f32>,
@@ -22,7 +22,12 @@ struct Dynamic {
     start: vec3<f32>,
     radius: f32,
     end: vec3<f32>,
-    padding: f32,
+    flags: u32,
+};
+
+struct Material {
+    albedo: vec3<f32>,
+    gloss: f32,
 };
 
 struct GpuLight {
@@ -44,6 +49,10 @@ struct GpuLight {
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var atlas: texture_3d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var atlas_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(5) var<storage, read> dynamics: array<Dynamic>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<storage, read> materials: array<Material>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(7) var paint: texture_3d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(8) var paint_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(9) var<storage, read> coarse: array<f32>;
 
 const BRICK: u32 = 8u;
 const APRON: u32 = 1u;
@@ -53,7 +62,7 @@ const NORMAL_TAP: f32 = 1.0;
 const TAG_EMPTY: u32 = 255u;
 const TAG_SOLID: u32 = 254u;
 const TAG_SHIFT: u32 = 24u;
-const CLEARANCE_MASK: u32 = 16777215u;
+const SLOT_MASK: u32 = 1048575u;
 
 const MAX_MARCH_STEPS: i32 = 128;
 const MAX_MARCH_DISTANCE: f32 = 100000.0;

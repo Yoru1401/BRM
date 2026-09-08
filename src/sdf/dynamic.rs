@@ -4,6 +4,9 @@ use bevy::{
 };
 
 use crate::sdf::render::{Quad, SdfMaterial};
+use crate::sdf::shapes::{CAPSULE, SPHERE};
+
+const KIND_SHIFT: u32 = 16;
 
 pub(crate) const MAX_DYNAMICS: usize = 64;
 
@@ -20,15 +23,33 @@ pub(crate) struct Dynamic {
     pub(crate) start: Vec3,
     pub(crate) end: Vec3,
     pub(crate) radius: f32,
+    pub(crate) material: u32,
+    pub(crate) kind: u32,
 }
 
 impl Dynamic {
-    pub(crate) fn ball(centre: Vec3, radius: f32) -> Self {
+    pub(crate) fn ball(centre: Vec3, radius: f32, material: u32) -> Self {
         Dynamic {
             start: centre,
             end: centre,
             radius,
+            material,
+            kind: SPHERE,
         }
+    }
+
+    pub(crate) fn rod(start: Vec3, end: Vec3, radius: f32, material: u32) -> Self {
+        Dynamic {
+            start,
+            end,
+            radius,
+            material,
+            kind: CAPSULE,
+        }
+    }
+
+    fn flags(&self) -> u32 {
+        self.material | (self.kind << KIND_SHIFT)
     }
 }
 
@@ -37,7 +58,7 @@ pub(crate) struct GpuDynamic {
     pub(crate) start: Vec3,
     pub(crate) radius: f32,
     pub(crate) end: Vec3,
-    pub(crate) padding: f32,
+    pub(crate) flags: u32,
 }
 
 fn bounding_sphere(bodies: &[GpuDynamic]) -> Vec4 {
@@ -67,7 +88,7 @@ fn sync_dynamics_to_gpu(
             start: body.start,
             radius: body.radius,
             end: body.end,
-            padding: 0.0,
+            flags: body.flags(),
         })
         .collect();
     if packed.len() > MAX_DYNAMICS {

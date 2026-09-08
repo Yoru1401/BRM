@@ -13,9 +13,10 @@ use bevy::{
 
 use crate::command_line;
 use crate::game::input::Action;
-use crate::sdf::adf::Adf;
+use crate::sdf::adf::{Adf, MAX_MATERIALS};
 use crate::sdf::dynamic::{GpuDynamic, MAX_DYNAMICS};
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
+use crate::sdf::shapes;
 
 pub(crate) struct RenderPlugin;
 
@@ -41,21 +42,49 @@ struct ShaderModules(
     #[expect(dead_code, reason = "held to keep the assets alive")] Vec<Handle<Shader>>,
 );
 
-fn load_shader_modules(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(ShaderModules(
-        SHADER_MODULES
-            .iter()
-            .map(|path| assets.load(*path))
-            .collect(),
-    ));
+fn load_shader_modules(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut shaders: ResMut<Assets<Shader>>,
+) {
+    let mut held: Vec<Handle<Shader>> = SHADER_MODULES
+        .iter()
+        .map(|path| assets.load(*path))
+        .collect();
+    held.push(shaders.add(Shader::from_wgsl(
+        shapes::wgsl(),
+        shapes::GENERATED_PATH,
+    )));
+    commands.insert_resource(ShaderModules(held));
 }
 
 const QUAD_DIST: f32 = 1.0;
 const QUAD_OVERSCAN: f32 = 1.01;
 
 pub(crate) const OMEGA: f32 = 1.0;
+
+#[derive(ShaderType, Debug, Clone, PartialEq, Default)]
+pub(crate) struct GpuMaterial {
+    pub(crate) albedo: Vec3,
+    pub(crate) gloss: f32,
+}
+
+fn palette(adf: &Adf) -> Vec<GpuMaterial> {
+    let mut packed: Vec<GpuMaterial> = adf
+        .palette
+        .iter()
+        .map(|entry| GpuMaterial {
+            albedo: entry.albedo,
+            gloss: entry.gloss,
+        })
+        .take(MAX_MATERIALS)
+        .collect();
+    packed.resize(MAX_MATERIALS, GpuMaterial::default());
+    packed
+}
 pub(crate) const SHADOW_STEPS: u32 = 48;
 pub(crate) const DETAIL: f32 = 1.0;
+const DEBUG_VIEWS: u32 = 3;
 
 #[derive(Component)]
 pub(crate) struct Quad;
@@ -78,7 +107,7 @@ pub(crate) struct RenderParams {
     pub(crate) slot_side: u32,
     pub(crate) atlas_side: f32,
     pub(crate) dynamic_count: u32,
-    pub(crate) padding_one: u32,
+    pub(crate) paint_side: f32,
     pub(crate) padding_two: u32,
     pub(crate) padding_three: u32,
     pub(crate) dynamic_bound: Vec4,
@@ -97,6 +126,13 @@ pub(crate) struct SdfMaterial {
     pub(crate) atlas: Handle<Image>,
     #[storage(5, read_only)]
     pub(crate) dynamics: Handle<ShaderBuffer>,
+    #[storage(6, read_only)]
+    pub(crate) materials: Handle<ShaderBuffer>,
+    #[texture(7, dimension = "3d")]
+    #[sampler(8)]
+    pub(crate) paint: Handle<Image>,
+    #[storage(9, read_only)]
+    pub(crate) coarse: Handle<ShaderBuffer>,
 }
 
 impl Material for SdfMaterial {
@@ -115,6 +151,12 @@ fn spawn_camera(mut commands: Commands) {
         Transform::from_xyz(0.0, 2.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
         RenderLayers::layer(0),
     ));
+}
+
+pub(crate) fn paint_image(voxels: &[u8], side: u32) -> Image {
+    let mut image = atlas_image(voxels, side);
+    image.sampler = ImageSampler::nearest();
+    image
 }
 
 pub(crate) fn atlas_image(voxels: &[u8], side: u32) -> Image {
@@ -151,9 +193,10 @@ pub(crate) fn spawn_quad(
             omega: command_line::value("--omega").unwrap_or(OMEGA),
             shadow_steps: command_line::value("--shadow-steps").map_or(SHADOW_STEPS, |s| s as u32),
             detail: command_line::value("--detail").unwrap_or(DETAIL),
-            debug_view: u32::from(command_line::flag("--debug-view")),
+            debug_view: command_line::value("--debug-view").unwrap_or(0.0) as u32,
             slot_side: adf.slots,
             atlas_side: adf.atlas_side() as f32,
+            paint_side: adf.paint_side() as f32,
             ..default()
         },
         page: buffers.add(ShaderBuffer::from(adf.page.clone())),
@@ -166,6 +209,9 @@ pub(crate) fn spawn_quad(
             GpuDynamic::default();
             MAX_DYNAMICS
         ])),
+        materials: buffers.add(ShaderBuffer::from(palette(adf))),
+        paint: images.add(paint_image(&adf.paint, adf.paint_side())),
+        coarse: buffers.add(ShaderBuffer::from(adf.coarse.clone())),
     });
 
     commands.entity(camera).with_child((
@@ -186,7 +232,7 @@ fn toggle_debug_view(
         return;
     }
     if let Some(mut material) = materials.get_mut(&quad.0) {
-        material.render_params.debug_view = 1 - material.render_params.debug_view;
+        material.render_params.debug_view = (material.render_params.debug_view + 1) % DEBUG_VIEWS;
     }
 }
 

@@ -1,4 +1,4 @@
-#import "shaders/bindings.wgsl"::{AMBIENT, GpuLight, LIGHT_DIRECTIONAL, LIGHT_SPOT, MAX_MARCH_DISTANCE, SHADOW_BIAS, SURFACE_THRESHOLD, lights, render_params}
+#import "shaders/bindings.wgsl"::{AMBIENT, GpuLight, LIGHT_DIRECTIONAL, LIGHT_SPOT, MAX_MARCH_DISTANCE, Material, SHADOW_BIAS, SURFACE_THRESHOLD, lights, render_params}
 #import "shaders/adf.wgsl"::{adf_probe}
 
 fn shadow_bias() -> f32 {
@@ -24,7 +24,13 @@ fn shadow_factor(origin: vec3<f32>, direction: vec3<f32>, far: f32, softness: f3
     return clamp(shade, 0.0, 1.0);
 }
 
-fn light_contribution(light: GpuLight, surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+fn light_contribution(
+    light: GpuLight,
+    surface_point: vec3<f32>,
+    normal: vec3<f32>,
+    towards_eye: vec3<f32>,
+    surface: Material,
+) -> vec3<f32> {
     var to_light = -light.direction;
     var distance_to_light = MAX_MARCH_DISTANCE;
     var attenuation = 1.0;
@@ -54,20 +60,30 @@ fn light_contribution(light: GpuLight, surface_point: vec3<f32>, normal: vec3<f3
     var visibility = 1.0;
     if light.shadow != 0u {
         let reach = min(distance_to_light, MAX_MARCH_DISTANCE);
+        let slope = clamp(1.0 / max(dot(normal, to_light), 0.15), 1.0, 6.0);
         visibility = shadow_factor(
-            surface_point + normal * shadow_bias(),
+            surface_point + normal * shadow_bias() * slope,
             to_light,
             reach,
             max(light.softness, 1e-3),
         );
     }
-    return light.colour * (light.intensity * facing * attenuation * visibility);
+    let halfway = normalize(to_light + towards_eye);
+    let sharpness = 8.0 + surface.gloss * 200.0;
+    let highlight = pow(max(dot(normal, halfway), 0.0), sharpness) * surface.gloss;
+    let reach = light.intensity * attenuation * visibility;
+    return light.colour * reach * (surface.albedo * facing + vec3<f32>(highlight * facing));
 }
 
-fn shade(surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    var total = vec3<f32>(AMBIENT);
+fn shade(
+    surface_point: vec3<f32>,
+    normal: vec3<f32>,
+    towards_eye: vec3<f32>,
+    surface: Material,
+) -> vec3<f32> {
+    var total = surface.albedo * AMBIENT;
     for (var index = 0u; index < render_params.light_count; index++) {
-        total += light_contribution(lights[index], surface_point, normal);
+        total += light_contribution(lights[index], surface_point, normal, towards_eye, surface);
     }
     return total;
 }

@@ -1,11 +1,11 @@
 use bevy::prelude::*;
 
-use crate::sdf::adf::{self, Adf};
+use crate::sdf::adf::{self, Adf, Surface};
 
 fn cube(half: f32) -> Vec<[Vec3; 3]> {
     let mut mesh = Mesh::from(Cuboid::from_length(half * 2.0));
     mesh.duplicate_vertices();
-    adf::triangles_of(&mesh)
+    adf::triangles_of(&mesh).0
 }
 
 fn exact_box(point: Vec3, half: f32) -> f32 {
@@ -14,7 +14,7 @@ fn exact_box(point: Vec3, half: f32) -> f32 {
 }
 
 fn baked(half: f32) -> Adf {
-    let baked = adf::bake(&cube(half));
+    let baked = adf::bake(&Surface::new(&cube(half), &[], &[]));
     assert!(baked.used > 0, "a cube baked into no bricks at all");
     baked
 }
@@ -98,7 +98,7 @@ fn torus(major: f32, minor: f32, rings: usize) -> Vec<[Vec3; 3]> {
         .minor_resolution(rings)
         .build();
     mesh.duplicate_vertices();
-    adf::triangles_of(&mesh)
+    adf::triangles_of(&mesh).0
 }
 
 fn exact_torus(point: Vec3, major: f32, minor: f32) -> f32 {
@@ -135,7 +135,7 @@ fn how_much_of_the_normal_error_is_the_mesh() {
 
     for rings in [24usize, 48, 96] {
         let started = std::time::Instant::now();
-        let field = adf::bake(&torus(MAJOR, MINOR, rings));
+        let field = adf::bake(&Surface::new(&torus(MAJOR, MINOR, rings), &[], &[]));
         let baked = started.elapsed().as_secs_f32();
         let mut worst: f32 = 0.0;
         let mut total = 0.0;

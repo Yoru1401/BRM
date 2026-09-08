@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::game::character::{Character, step_character};
-use crate::sdf::adf::{self, Adf};
+use crate::sdf::adf::{self, Adf, Surface};
 
 const STEP: f32 = 1.0 / 64.0;
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -10,13 +10,13 @@ const TOP: f32 = 2.0;
 fn slab() -> Adf {
     let mut mesh = Mesh::from(Cuboid::new(24.0, 4.0, 24.0));
     mesh.duplicate_vertices();
-    let mut triangles = adf::triangles_of(&mesh);
+    let mut triangles = adf::triangles_of(&mesh).0;
     for triangle in triangles.iter_mut() {
         for corner in triangle.iter_mut() {
             corner.y += TOP - 2.0;
         }
     }
-    adf::bake(&triangles)
+    adf::bake(&Surface::new(&triangles, &[], &[]))
 }
 
 fn settled(field: &Adf, wish: Vec3, jump_for: usize, steps: usize) -> (Character, Vec3) {

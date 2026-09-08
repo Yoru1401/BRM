@@ -50,14 +50,25 @@ that reads the volume.
   upright and leans it into acceleration, movement is a clamped acceleration
   toward a ramped goal velocity, and the jump has an input buffer, coyote time
   and variable gravity so holding the button jumps higher.
+- **Materials** — 16 palette entries of albedo and gloss, sampled **per voxel**
+  from a second volume beside the distance atlas (8³ per brick, half the memory,
+  read once per shaded pixel so the march costs nothing extra). A dynamic carries
+  its own index. `gloss` drives a Blinn-Phong lobe, so two materials of the same
+  colour still read differently. The palette belongs to whoever built the
+  geometry — no material is named in the engine or in any shader.
 - **Lights** — point, directional and spot, with opt-in shadows that march the
   real field. Three lights with a shadow caster cost 0.02 ms more than one light
   with none. Only samples from the encoded band may drive the penumbra, so
   shadows are hard beyond four voxels: a bound undershoots, and shading one
   paints brick-shaped patches across every shadowed surface.
 
-The shader is five files — `sdf.wgsl` holds only the entry points and imports
-`bindings`, `adf`, `marching` and `lighting`.
+**No shape is written by hand in WGSL.** The primitive maths lives in a table in
+`src/sdf/shapes.rs`, which emits the distance and exact-normal functions plus a
+`switch` over them and registers the result as a shader module at startup. Adding
+a primitive is one table entry.
+
+The hand-written shader is five files — `sdf.wgsl` holds only the entry points
+and imports `bindings`, `adf`, `marching` and `lighting`.
 
 The source carries no comments. What a name cannot say lives in `memory/`.
 
@@ -83,8 +94,9 @@ adf: 105346 triangles, 101348 bricks of 150000, 1.099 m voxels,
      1037 m across, 99 MB atlas, 1 MB page, baked in 8.5 s
 ```
 
-**3.40 ms at 720p** with four lights and a shadowed sun. A 20 m map reads
-2.62 ms, so the frame cost tracks screen coverage rather than world size.
+**4.4-4.8 ms at 720p** with four lights, a shadowed sun, dynamic shapes and
+per-voxel materials. A 20 m map reads 2.62 ms, so the frame cost tracks screen coverage
+rather than world size.
 
 Debug builds are misleading: `debug-assertions` are profile-wide and put a
 ~2 ms floor under every frame.
@@ -93,7 +105,7 @@ Debug builds are misleading: `debug-assertions` are profile-wide and put a
 |---|---|
 | `WASD` / `Space` / `LShift`, right-drag | fly camera |
 | `V` | hide the quad — the frame floor underneath |
-| `H` | shaded / march-step heatmap |
+| `H` | cycle shaded / march-step heatmap / brick grid |
 
 ## Benchmark
 
@@ -122,6 +134,8 @@ that owns a value reads its own flag; the default stays a `const` beside it.
 | `--omega <n>` | 1.2 | march over-relaxation; 1.0 is plain sphere tracing |
 | `--shadow-steps <n>` | 48 | steps a shadow ray may take; `0` turns shadows off, which is the A/B that isolates them |
 | `--detail <n>` | 1.0 | march stopping tolerance, in pixels |
+| `--debug-view <n>` | 0 | 0 shaded, 1 march-step heatmap, 2 brick grid |
+| `--eye x y z` / `--look x y z` | scene-fitted | place the camera, to reproduce a reported view |
 | `--res <name>` | 720p | `540p` … `4k`; `--width` / `--height` override |
 | `--render-scale <n>` | 1.0 | march at a fraction of the window and upscale |
 | `--speed <n>` | 5.0 | fly camera |
@@ -152,6 +166,8 @@ Three folders, by who is allowed to know about whom.
 | `sdf/field` | loading the model, baking once, spawning the quad |
 | `sdf/render` | material, shader-module loading, quad fitting, debug views |
 | `sdf/light` | point / directional / spot, opt-in soft shadows |
+| `sdf/dynamic` | moving shapes, folded into the field by min |
+| `sdf/shapes` | the primitive table, and the WGSL it generates |
 | `game/scene` | lights and bodies |
 | `game/character` | the floating-capsule controller and its camera |
 | `game/physics` | bodies, contacts, sleep |
@@ -197,5 +213,10 @@ cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --noc
 - No CSG. Two models cannot be combined; the field is whatever the triangles say.
 - Dynamics render but do not collide with each other through the field: the CPU
   field is the baked one only.
+- Nothing thinner than about four voxels survives the bake; it comes out as
+  shredded fragments. The bake warns when a part is that thin.
+- Where two surfaces meet, the crease is reconstructed at voxel resolution and
+  reads as a scalloped edge. It scales with the voxel, so `--bricks` buys it back.
+- A glTF's own materials are ignored: an imported model is all material 0.
 - Body radius is capped at `range * 0.9`, so **physics scale is limited by bake
   resolution** — a 1 km world at 1.1 m voxels cannot carry metre-scale bodies.

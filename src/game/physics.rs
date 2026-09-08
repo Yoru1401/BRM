@@ -247,7 +247,7 @@ fn resolve_body_pairs(mut bodies: Query<(&mut SphereBody, &mut Transform)>) {
 
 fn track_bodies(mut bodies: Query<(&SphereBody, &Transform, &mut Dynamic)>) {
     for (body, placement, mut shape) in &mut bodies {
-        *shape = Dynamic::ball(placement.translation, body.radius);
+        *shape = Dynamic::ball(placement.translation, body.radius, shape.material);
     }
 }
 
