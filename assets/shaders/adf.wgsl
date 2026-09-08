@@ -152,6 +152,10 @@ fn surface_normal(surface_point: vec3<f32>) -> vec3<f32> {
     return baked_normal(surface_point);
 }
 
+fn level_at(world_position: vec3<f32>) -> u32 {
+    return finest_level(world_position);
+}
+
 fn finest_level(world_position: vec3<f32>) -> u32 {
     for (var step = 0u; step < render_params.level_count; step++) {
         let level = render_params.levels[step];

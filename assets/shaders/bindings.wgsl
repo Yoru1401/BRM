@@ -1,3 +1,10 @@
+struct Outline {
+    low: vec3<f32>,
+    depth: f32,
+    high: vec3<f32>,
+    leaf: f32,
+};
+
 struct LevelInfo {
     origin: vec3<f32>,
     brick_size: f32,
@@ -25,7 +32,7 @@ struct RenderParams {
     dynamic_count: u32,
     paint_side: f32,
     level_count: u32,
-    padding_three: u32,
+    outline_count: u32,
     dynamic_bound: vec4<f32>,
     levels: array<LevelInfo, 4>,
 };
@@ -65,6 +72,7 @@ struct GpuLight {
 @group(#{MATERIAL_BIND_GROUP}) @binding(7) var paint: texture_3d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(8) var paint_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(9) var<storage, read> coarse: array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(10) var<storage, read> outline: array<Outline>;
 
 const BRICK: u32 = 8u;
 const APRON: u32 = 1u;

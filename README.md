@@ -141,7 +141,7 @@ profile-wide and put a ~2 ms floor under every frame.
 |---|---|
 | `WASD` / `Space` / `LShift`, right-drag | fly camera |
 | `V` | hide the quad — the frame floor underneath |
-| `H` | cycle shaded / march-step heatmap / brick grid |
+| `H` | cycle shaded / march-step heatmap / brick grid / BVH boxes |
 
 ## Benchmark
 
@@ -182,7 +182,7 @@ that owns a value reads its own flag; the default stays a `const` beside it.
 | `--omega <n>` | 1.0 | march over-relaxation; 1.0 is plain sphere tracing |
 | `--shadow-steps <n>` | 48 | steps a shadow ray may take; `0` turns shadows off, which is the A/B that isolates them |
 | `--detail <n>` | 1.0 | march stopping tolerance, in pixels |
-| `--debug-view <n>` | 0 | 0 shaded, 1 march-step heatmap, 2 brick grid |
+| `--debug-view <n>` | 0 | 0 shaded, 1 march-step heatmap, 2 brick grid, 3 BVH boxes |
 | `--eye x y z` / `--look x y z` | scene-fitted | place the camera, to reproduce a reported view |
 | `--res <name>` | 720p | `540p` … `4k`; `--width` / `--height` override |
 | `--render-scale <n>` | 1.0 | march at a fraction of the window and upscale |

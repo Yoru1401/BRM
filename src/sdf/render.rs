@@ -13,7 +13,7 @@ use bevy::{
 
 use crate::command_line;
 use crate::game::input::Action;
-use crate::sdf::adf::{Adf, MAX_LEVELS, MAX_MATERIALS};
+use crate::sdf::adf::{Adf, MAX_LEVELS, MAX_MATERIALS, MAX_OUTLINE};
 use crate::sdf::dynamic::{GpuDynamic, MAX_DYNAMICS};
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 use crate::sdf::shapes;
@@ -84,13 +84,21 @@ fn palette(adf: &Adf) -> Vec<GpuMaterial> {
 }
 pub(crate) const SHADOW_STEPS: u32 = 48;
 pub(crate) const DETAIL: f32 = 1.0;
-const DEBUG_VIEWS: u32 = 3;
+const DEBUG_VIEWS: u32 = 4;
 
 #[derive(Component)]
 pub(crate) struct Quad;
 
 #[derive(Component)]
 pub(crate) struct MainCamera;
+
+#[derive(ShaderType, Debug, Clone, Default, PartialEq)]
+pub(crate) struct GpuOutline {
+    pub(crate) low: Vec3,
+    pub(crate) depth: f32,
+    pub(crate) high: Vec3,
+    pub(crate) leaf: f32,
+}
 
 #[derive(ShaderType, Debug, Clone, Default, PartialEq)]
 pub(crate) struct LevelInfo {
@@ -121,7 +129,7 @@ pub(crate) struct RenderParams {
     pub(crate) dynamic_count: u32,
     pub(crate) paint_side: f32,
     pub(crate) level_count: u32,
-    pub(crate) padding_three: u32,
+    pub(crate) outline_count: u32,
     pub(crate) dynamic_bound: Vec4,
     pub(crate) levels: [LevelInfo; MAX_LEVELS],
 }
@@ -146,6 +154,8 @@ pub(crate) struct SdfMaterial {
     pub(crate) paint: Handle<Image>,
     #[storage(9, read_only)]
     pub(crate) coarse: Handle<ShaderBuffer>,
+    #[storage(10, read_only)]
+    pub(crate) outline: Handle<ShaderBuffer>,
 }
 
 impl Material for SdfMaterial {
@@ -207,6 +217,24 @@ fn level_infos(adf: &Adf) -> [LevelInfo; MAX_LEVELS] {
     infos
 }
 
+fn outlines(adf: &Adf) -> Vec<GpuOutline> {
+    let mut shown: Vec<GpuOutline> = adf
+        .outline
+        .iter()
+        .take(MAX_OUTLINE)
+        .map(|node| GpuOutline {
+            low: node.low,
+            depth: node.depth as f32,
+            high: node.high,
+            leaf: f32::from(u8::from(node.leaf)),
+        })
+        .collect();
+    if shown.is_empty() {
+        shown.push(GpuOutline::default());
+    }
+    shown
+}
+
 fn stacked_pages(adf: &Adf) -> Vec<u32> {
     adf.levels
         .iter()
@@ -237,6 +265,7 @@ pub(crate) fn spawn_quad(
             bricks: adf.coarsest().bricks,
             voxel: adf.voxel(),
             level_count: adf.levels.len() as u32,
+            outline_count: adf.outline.len().min(MAX_OUTLINE) as u32,
             levels: level_infos(adf),
             omega: command_line::value("--omega").unwrap_or(OMEGA),
             shadow_steps: command_line::value("--shadow-steps").map_or(SHADOW_STEPS, |s| s as u32),
@@ -260,6 +289,7 @@ pub(crate) fn spawn_quad(
         materials: buffers.add(ShaderBuffer::from(palette(adf))),
         paint: images.add(paint_image(&adf.paint, adf.paint_side())),
         coarse: buffers.add(ShaderBuffer::from(stacked_coarse(adf))),
+        outline: buffers.add(ShaderBuffer::from(outlines(adf))),
     });
 
     commands.entity(camera).with_child((

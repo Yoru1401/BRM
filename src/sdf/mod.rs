@@ -1,4 +1,5 @@
 pub mod adf;
+pub mod bvh;
 pub mod dynamic;
 pub mod field;
 pub mod light;

@@ -5,6 +5,7 @@ use bevy::{
 };
 
 use crate::command_line;
+use crate::sdf::bvh::Bvh;
 use crate::sdf::solid::{Op, Solid};
 
 pub(crate) const BRICK: u32 = 8;
@@ -28,6 +29,7 @@ pub(crate) const BIAS_VOXELS: f32 = 0.866;
 const NORMAL_TAP: f32 = 1.0;
 const BRICK_BUDGET: u32 = 150_000;
 pub(crate) const MAX_LEVELS: usize = 4;
+pub(crate) const MAX_OUTLINE: usize = 128;
 
 pub(crate) fn brick_budget() -> u32 {
     command_line::value("--bricks")
@@ -48,6 +50,14 @@ impl Default for Material {
             gloss: 0.08,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Outline {
+    pub(crate) low: Vec3,
+    pub(crate) high: Vec3,
+    pub(crate) depth: u32,
+    pub(crate) leaf: bool,
 }
 
 #[derive(Clone)]
@@ -79,6 +89,7 @@ impl Level {
 #[derive(Resource, Clone)]
 pub(crate) struct Adf {
     pub(crate) levels: Vec<Level>,
+    pub(crate) outline: Vec<Outline>,
     pub(crate) slots: u32,
     pub(crate) atlas: Vec<u8>,
     pub(crate) paint: Vec<u8>,
@@ -96,6 +107,7 @@ impl Default for Adf {
                 page: vec![EMPTY],
                 coarse: vec![0.0],
             }],
+            outline: Vec::new(),
             slots: 1,
             atlas: vec![0; (SPAN * SPAN * SPAN) as usize],
             paint: vec![0; (BRICK * BRICK * BRICK) as usize],
@@ -457,6 +469,7 @@ fn merge(parts: Vec<Adf>) -> Adf {
     let mut paint = vec![0u8; (paint_side as usize).pow(3)];
     let mut levels = Vec::with_capacity(parts.len());
     let palette = parts[0].palette.clone();
+    let outline = parts[0].outline.clone();
     let mut next = 0u32;
 
     for part in parts {
@@ -499,6 +512,7 @@ fn merge(parts: Vec<Adf>) -> Adf {
 
     Adf {
         levels,
+        outline,
         slots,
         atlas,
         paint,
@@ -705,11 +719,24 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
         }
     }
 
+    let tree = Bvh::build(&surface.boxes, |index| surface.op(index).everywhere());
+    let outline = tree
+        .shallowest(MAX_OUTLINE)
+        .into_iter()
+        .map(|(low, high, depth, leaf)| Outline {
+            low,
+            high,
+            depth,
+            leaf,
+        })
+        .collect();
+
     seal_interior(&mut page, bricks);
     let near: Vec<bool> = lists.iter().map(|list| !list.is_empty()).collect();
     let coarse = measure_coarse(&near, bricks, size);
 
     Some(Adf {
+        outline,
         levels: vec![Level {
             origin,
             voxel,
