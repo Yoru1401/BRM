@@ -7,26 +7,34 @@ Bevy 0.19.1, Rust edition 2024.
 
 ## What it does
 
-**The field is baked, and there are no primitives.** Nothing in the engine knows
-what a sphere or a box is, in Rust or in WGSL. You hand it a triangle mesh; it
-voxelises that mesh into a sparse brick volume at startup, and everything after
-that reads the volume.
+**The field is baked, and no shape is written by hand in WGSL.** You hand it
+exact solids, a triangle mesh, or both; it voxelises them into a sparse brick
+volume at startup, and everything after that reads the volume.
 
-- **Bake** — `src/sdf/adf.rs`. Triangles are binned per brick, each brick holds
+Solids live in `src/sdf/solid.rs` - box, sphere, cylinder, capped frustum,
+torus - and are evaluated **on the CPU at bake time**, never in a shader. That
+is a precision decision: a mesh sphere bakes as the icosphere it is, and at the
+tessellation the generated world used, its facets were two to eight times
+coarser than the voxels sampling them. Meshes remain, for imports.
+
+- **Bake** - `src/sdf/adf.rs`. Triangles and solids are binned per brick, each brick holds
   8³ voxels plus a one-voxel apron, and every voxel stores the signed distance to
-  the mesh, biased down by half a voxel diagonal so the trilinear reconstruction
-  can never overestimate. Sign comes from an angle-weighted pseudonormal at the
-  closest point. Bricks with no geometry near them are not allocated; the ones
+  the surface, biased down by half a voxel diagonal so the trilinear
+  reconstruction can never overestimate. A mesh's sign comes from an
+  angle-weighted pseudonormal at the closest point; a solid's is exact. Solids
+  bin by a near-surface shell rather than by their box, because a sphere's box
+  is the whole ball. Bricks with no geometry near them are not allocated; the ones
   inside the model are marked solid by a flood fill from outside.
 - **Store** — a `u32` page table, one entry per brick, plus one `R8Unorm` 3D
   texture atlas. Both are sized to the model at bake time and uploaded once; a
-  1 km world is 1 MB of page and 99 MB of atlas. A page word is either an atlas
-  slot or a tag plus the brick's *clearance* — how many bricks of proven empty
-  space surround it.
+  1 km world is 1 MB of page and 86 MB of atlas. A page word is either an atlas
+  slot or a tag; beside it, one `f32` per brick holds a **chamfer distance
+  transform** over the brick grid - the distance to the nearest brick that holds
+  any geometry.
 - **Render** — ray marching on a single frustum-fitted quad, one ray per pixel.
   A step is one page read and one hardware-trilinear fetch. Empty bricks return
-  `inscribed + clearance * brick_size`, a proven underestimate, and that is the
-  whole of the empty-space acceleration.
+  `inscribed + coarse + range`, a proven underestimate, and that is the whole of
+  the empty-space acceleration.
   Over-relaxation is available (`--omega`) but off by default: on a field of
   bounds it eats holes in grazing silhouettes. The fragment stage writes real
   depth, so ordinary Bevy 3D entities share the world and occlude correctly.
@@ -62,10 +70,12 @@ that reads the volume.
   shadows are hard beyond four voxels: a bound undershoots, and shading one
   paints brick-shaped patches across every shadowed surface.
 
-**No shape is written by hand in WGSL.** The primitive maths lives in a table in
+The **dynamics'** shapes are generated too: their maths lives in a table in
 `src/sdf/shapes.rs`, which emits the distance and exact-normal functions plus a
-`switch` over them and registers the result as a shader module at startup. Adding
-a primitive is one table entry.
+`switch` over them and registers the result as a shader module at startup.
+Adding one is a single table entry. Bake-time solids and shader dynamics are
+separate tables on purpose - `shapes.rs` stores shader *source*, which the CPU
+cannot evaluate.
 
 The hand-written shader is five files — `sdf.wgsl` holds only the entry points
 and imports `bindings`, `adf`, `marching` and `lighting`.
@@ -77,6 +87,8 @@ The source carries no comments. What a name cannot say lives in `memory/`.
 ```sh
 cargo run --release
 cargo run --release -- --play
+cargo run --release -- --scene gym --play
+cargo run --release -- --scene zoo
 cargo run --release -- --model models/thing.glb
 ```
 
@@ -84,22 +96,42 @@ cargo run --release -- --model models/thing.glb
 defaults the world to 200 m so the voxels are character-scale. `WASD` moves
 relative to the camera, `Space` jumps, right-drag orbits.
 
-Without `--model` it generates a **1 km open world** — sine-noise terrain closed
-with a skirt and a floor, 220 structures planted at ground height, four torus
-arches — merges it into one mesh and bakes it in about 8.5 s. It is a
-placeholder, not a feature.
+### Scenes
+
+`--scene` picks what gets baked. Three of them are documentation you walk
+through, after the
+[gym / zoo / museum](https://rystorm.com/blog/gyms-zoos-museums-your-documentation-should-be-in-game)
+pattern. Each is built entirely from exact solids - zero triangles - and prints
+its own legend in the overlay.
+
+| scene | shows | try |
+|---|---|---|
+| `gym` | what the controller can do: risers 0.25-3.0 m, gaps 1-6 m, ramps 10-50 degrees, clearance bars 1.2-3.0 m | `--scene gym --play` |
+| `zoo` | every material on an identical sphere, every solid the baker knows, and a post one character tall for scale | `--scene zoo` |
+| `museum` | penumbra widening with distance, bodies folded into the field, spheres shrinking past the voxel | `--scene museum` |
+
+Nothing is labelled in world space: the legend is the overlay, and the obstacles
+are ordered so you read the limit off the last one you clear.
+
+Without `--scene` or `--model` it generates the **1 km open world** - sine-noise
+terrain closed with a skirt and a floor as a mesh, plus 220 structures and four
+arches as exact solids.
 
 ```
-adf: 105346 triangles, 101348 bricks of 150000, 1.099 m voxels,
-     1037 m across, 99 MB atlas, 1 MB page, baked in 8.5 s
+adf: 75266 triangles, 90689 bricks of 150000, 1.099 m voxels,
+     1037 m across, 86 MB atlas, 44 MB paint, 1 MB page, baked in 28.4 s
 ```
 
-**4.4-4.8 ms at 720p** with four lights, a shadowed sun, dynamic shapes and
-per-voxel materials. A 20 m map reads 2.62 ms, so the frame cost tracks screen coverage
-rather than world size.
+The documentation scenes bake in 2.6-4.2 s and get far finer voxels for it:
+0.066 m in the zoo, 0.154 m in the gym, 0.165 m in the museum.
 
-Debug builds are misleading: `debug-assertions` are profile-wide and put a
-~2 ms floor under every frame.
+**Frame time is currently unmeasurable.** Every `bench` run reports 16.7 ms,
+exactly 60 Hz, in every present mode and in fullscreen - the compositor is
+holding vsync, and the harness says so itself. Treat any frame time in this file
+as unverified until that is fixed.
+
+Debug builds are misleading for a different reason: `debug-assertions` are
+profile-wide and put a ~2 ms floor under every frame.
 
 | key | does |
 |---|---|
@@ -125,13 +157,14 @@ that owns a value reads its own flag; the default stays a `const` beside it.
 
 | flag | default | what |
 |---|---|---|
+| `--scene <name>` | `play` | `gym`, `zoo`, `museum`, or the open world |
 | `--model <path>` | the test map | glTF mesh to bake, first mesh, first primitive |
-| `--size <m>` | 1000.0 | widest extent the model is scaled to |
+| `--size <m>` | per scene | widest extent the geometry is scaled to |
 | `--bricks <n>` | 150000 | brick budget; the bake coarsens the voxel until it fits |
 | `--voxel <m>` | derived | pin the voxel size instead of deriving it |
 | `--bodies <n>` | 6 | spheres dropped on it |
 | `--play` | off | character controller and follow camera; defaults `--size` to 200 |
-| `--omega <n>` | 1.2 | march over-relaxation; 1.0 is plain sphere tracing |
+| `--omega <n>` | 1.0 | march over-relaxation; 1.0 is plain sphere tracing |
 | `--shadow-steps <n>` | 48 | steps a shadow ray may take; `0` turns shadows off, which is the A/B that isolates them |
 | `--detail <n>` | 1.0 | march stopping tolerance, in pixels |
 | `--debug-view <n>` | 0 | 0 shaded, 1 march-step heatmap, 2 brick grid |
@@ -167,8 +200,11 @@ Three folders, by who is allowed to know about whom.
 | `sdf/render` | material, shader-module loading, quad fitting, debug views |
 | `sdf/light` | point / directional / spot, opt-in soft shadows |
 | `sdf/dynamic` | moving shapes, folded into the field by min |
-| `sdf/shapes` | the primitive table, and the WGSL it generates |
-| `game/scene` | lights and bodies |
+| `sdf/solid` | exact shapes the bake evaluates; add one here and nowhere else |
+| `sdf/scenes` | the gym, the zoo, the museum, and their legends |
+| `sdf/shapes` | the dynamics' shape table, and the WGSL it generates |
+| `game/scene` | lights and bodies, per scene |
+| `display` | window, resolution, render scale |
 | `game/character` | the floating-capsule controller and its camera |
 | `game/physics` | bodies, contacts, sleep |
 | `game/input` | `Action`, `Bindings` |
@@ -190,10 +226,13 @@ cargo test --release
 
 The bake is checked against closed-form distances: a cube's field must never
 overestimate, its interior must read negative, its normals must point out of the
-nearest face. One ignored diagnostic measures how far the reconstructed normal
-drifts from an analytic torus, and how much of that is the mesh's own faceting:
+nearest face. Two ignored diagnostics do the measuring. The first compares the bake against
+brute force over the **ideal shapes** - not against the triangles it was handed,
+which is what let it report zero error for days while spheres came out faceted.
+The second measures normal drift against an analytic torus.
 
 ```sh
+cargo test --release how_far_the_bake_strays_from_the_truth -- --ignored --nocapture
 cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --nocapture
 ```
 
@@ -217,6 +256,12 @@ cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --noc
   shredded fragments. The bake warns when a part is that thin.
 - Where two surfaces meet, the crease is reconstructed at voxel resolution and
   reads as a scalloped edge. It scales with the voxel, so `--bricks` buys it back.
+- **Materials melt across close junctions.** Every surface is inflated by the
+  0.866-voxel bias, so two of them closer together than about 1.7 voxels fuse,
+  and the fused blob takes its material from whichever source is nearest. Exact
+  input does not help; only a smaller voxel does.
+- **The bench is blind.** Nothing about frame time can be claimed until it is
+  fixed.
 - A glTF's own materials are ignored: an imported model is all material 0.
 - Body radius is capped at `range * 0.9`, so **physics scale is limited by bake
   resolution** — a 1 km world at 1.1 m voxels cannot carry metre-scale bodies.

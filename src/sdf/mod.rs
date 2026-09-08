@@ -4,4 +4,5 @@ pub mod field;
 pub mod light;
 pub mod render;
 pub mod shapes;
+pub mod scenes;
 pub mod solid;

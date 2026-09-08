@@ -9,6 +9,7 @@ use bevy::{
 use crate::command_line;
 use crate::sdf::adf::{self, Adf, Material, Surface};
 use crate::sdf::render::{MainCamera, SdfMaterial, spawn_quad};
+use crate::sdf::scenes::{self, Scene};
 use crate::sdf::solid::{Shape, Solid};
 
 pub(crate) struct FieldPlugin;
@@ -26,7 +27,7 @@ const PLAY_SIZE: f32 = 200.0;
 
 #[derive(Resource)]
 struct Pending {
-    mesh: Handle<Mesh>,
+    mesh: Option<Handle<Mesh>>,
     marks: Vec<u8>,
     parts: Vec<u16>,
     solids: Vec<Solid>,
@@ -39,26 +40,34 @@ fn request_model(
 ) {
     let pending = match command_line::text("--model") {
         Some(path) => Pending {
-            mesh: assets.load(
+            mesh: Some(assets.load(
                 GltfAssetLabel::Primitive {
                     mesh: 0,
                     primitive: 0,
                 }
                 .from_asset(path),
-            ),
+            )),
             marks: Vec::new(),
             parts: Vec::new(),
             solids: Vec::new(),
         },
-        None => {
-            let (mesh, marks, parts, solids) = placeholder();
-            Pending {
-                mesh: meshes.add(mesh),
-                marks,
-                parts,
-                solids,
+        None => match scenes::chosen() {
+            Scene::Play => {
+                let (mesh, marks, parts, solids) = open_world();
+                Pending {
+                    mesh: Some(meshes.add(mesh)),
+                    marks,
+                    parts,
+                    solids,
+                }
             }
-        }
+            scene => Pending {
+                mesh: None,
+                marks: Vec::new(),
+                parts: Vec::new(),
+                solids: scenes::build(scene),
+            },
+        },
     };
     commands.insert_resource(pending);
 }
@@ -178,7 +187,7 @@ fn terrain() -> Mesh {
     mesh
 }
 
-fn placeholder() -> (Mesh, Vec<u8>, Vec<u16>, Vec<Solid>) {
+fn open_world() -> (Mesh, Vec<u8>, Vec<u16>, Vec<Solid>) {
     let world = terrain();
     let marks: Vec<u8> = vec![MATERIAL_TERRAIN as u8; triangle_count(&world)];
     let parts: Vec<u16> = vec![0; marks.len()];
@@ -278,10 +287,13 @@ fn bake_when_ready(
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut adf: ResMut<Adf>,
 ) {
-    let Some(mesh) = meshes.get(&pending.mesh) else {
-        return;
+    let (mut triangles, sources) = match &pending.mesh {
+        Some(handle) => match meshes.get(handle) {
+            Some(mesh) => adf::triangles_of(mesh),
+            None => return,
+        },
+        None => (Vec::new(), Vec::new()),
     };
-    let (mut triangles, sources) = adf::triangles_of(mesh);
     let marks: Vec<u8> = sources
         .iter()
         .map(|source| pending.marks.get(*source as usize).copied().unwrap_or(0))
@@ -292,18 +304,20 @@ fn bake_when_ready(
         .collect();
     let mut solids = pending.solids.clone();
     commands.remove_resource::<Pending>();
-    if triangles.is_empty() {
-        error!("model has no triangles; nothing to bake");
+    if triangles.is_empty() && solids.is_empty() {
+        error!("scene has no geometry; nothing to bake");
         return;
     }
 
     adf::fit(
         &mut triangles,
         &mut solids,
-        command_line::value("--size").unwrap_or(match command_line::flag("--play") {
-            true => PLAY_SIZE,
-            false => MODEL_SIZE,
-        }),
+        command_line::value("--size")
+            .or_else(|| scenes::chosen().size())
+            .unwrap_or(match command_line::flag("--play") {
+                true => PLAY_SIZE,
+                false => MODEL_SIZE,
+            }),
     );
     let started = std::time::Instant::now();
     *adf = adf::bake(&Surface::new(&triangles, &marks, &parts).with_solids(&solids));

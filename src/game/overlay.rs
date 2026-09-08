@@ -7,6 +7,7 @@ use core::time::Duration;
 
 use crate::sdf::adf::Adf;
 use crate::sdf::render::{MainCamera, Quad, SdfMaterial};
+use crate::sdf::scenes;
 
 pub(crate) struct OverlayPlugin;
 
@@ -82,7 +83,16 @@ fn update_stats(
          quad: {shown}  [V]\n\
          view: {view}  [H]\n\
          cpu sdf here: {here:.3}\n\
-         bounds: {:.1} x {:.1} x {:.1}",
-        bricks.x, bricks.y, bricks.z, field.used, field.voxel, span.x, span.y, span.z
+         bounds: {:.1} x {:.1} x {:.1}
+{}",
+        bricks.x,
+        bricks.y,
+        bricks.z,
+        field.used,
+        field.voxel,
+        span.x,
+        span.y,
+        span.z,
+        scenes::chosen().legend()
     );
 }

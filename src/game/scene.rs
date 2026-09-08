@@ -6,6 +6,7 @@ use crate::sdf::adf::Adf;
 use crate::sdf::dynamic::Dynamic;
 use crate::sdf::light::{Light, LightKind};
 use crate::sdf::field::MATERIAL_BODY;
+use crate::sdf::scenes::{self, Scene};
 
 pub(crate) struct ScenePlugin;
 
@@ -76,7 +77,11 @@ fn populate(mut commands: Commands, field: Res<Adf>) {
         Transform::from_translation(centre + Vec3::new(reach * 0.1, reach * 0.04, -reach * 0.08)),
     ));
 
-    let count = command_line::value("--bodies").map_or(BODIES, |value| value as usize);
+    let resting = match scenes::chosen() {
+        Scene::Gym | Scene::Zoo => 0,
+        Scene::Play | Scene::Museum => BODIES,
+    };
+    let count = command_line::value("--bodies").map_or(resting, |value| value as usize);
     if count == 0 {
         return;
     }
