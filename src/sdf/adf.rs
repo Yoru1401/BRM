@@ -27,6 +27,7 @@ const RANGE_VOXELS: f32 = 4.0;
 pub(crate) const BIAS_VOXELS: f32 = 0.866;
 const NORMAL_TAP: f32 = 1.0;
 const BRICK_BUDGET: u32 = 150_000;
+pub(crate) const MAX_LEVELS: usize = 4;
 
 pub(crate) fn brick_budget() -> u32 {
     command_line::value("--bricks")
@@ -49,16 +50,38 @@ impl Default for Material {
     }
 }
 
-#[derive(Resource, Clone)]
-pub(crate) struct Adf {
+#[derive(Clone)]
+pub(crate) struct Level {
     pub(crate) origin: Vec3,
     pub(crate) voxel: f32,
     pub(crate) bricks: UVec3,
-    pub(crate) slots: u32,
     pub(crate) page: Vec<u32>,
+    pub(crate) coarse: Vec<f32>,
+}
+
+impl Level {
+    pub(crate) fn brick_size(&self) -> f32 {
+        self.voxel * BRICK as f32
+    }
+
+    pub(crate) fn range(&self) -> f32 {
+        self.voxel * RANGE_VOXELS
+    }
+
+    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+        (
+            self.origin,
+            self.origin + self.bricks.as_vec3() * self.brick_size(),
+        )
+    }
+}
+
+#[derive(Resource, Clone)]
+pub(crate) struct Adf {
+    pub(crate) levels: Vec<Level>,
+    pub(crate) slots: u32,
     pub(crate) atlas: Vec<u8>,
     pub(crate) paint: Vec<u8>,
-    pub(crate) coarse: Vec<f32>,
     pub(crate) palette: Vec<Material>,
     pub(crate) used: u32,
 }
@@ -66,14 +89,16 @@ pub(crate) struct Adf {
 impl Default for Adf {
     fn default() -> Self {
         Adf {
-            origin: Vec3::ZERO,
-            voxel: 1.0,
-            bricks: UVec3::ONE,
+            levels: vec![Level {
+                origin: Vec3::ZERO,
+                voxel: 1.0,
+                bricks: UVec3::ONE,
+                page: vec![EMPTY],
+                coarse: vec![0.0],
+            }],
             slots: 1,
-            page: vec![EMPTY],
             atlas: vec![0; (SPAN * SPAN * SPAN) as usize],
             paint: vec![0; (BRICK * BRICK * BRICK) as usize],
-            coarse: vec![0.0],
             palette: vec![Material::default()],
             used: 0,
         }
@@ -81,12 +106,24 @@ impl Default for Adf {
 }
 
 impl Adf {
-    pub(crate) fn brick_size(&self) -> f32 {
-        self.voxel * BRICK as f32
+    pub(crate) fn finest(&self) -> &Level {
+        &self.levels[0]
+    }
+
+    pub(crate) fn coarsest(&self) -> &Level {
+        self.levels.last().unwrap_or(&self.levels[0])
+    }
+
+    pub(crate) fn voxel(&self) -> f32 {
+        self.finest().voxel
+    }
+
+    pub(crate) fn bricks(&self) -> UVec3 {
+        self.finest().bricks
     }
 
     pub(crate) fn range(&self) -> f32 {
-        self.voxel * RANGE_VOXELS
+        self.finest().range()
     }
 
     pub(crate) fn atlas_side(&self) -> u32 {
@@ -98,10 +135,7 @@ impl Adf {
     }
 
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
-        (
-            self.origin,
-            self.origin + self.bricks.as_vec3() * self.brick_size(),
-        )
+        self.coarsest().bounds()
     }
 
     pub(crate) fn distance(&self, world_point: Vec3) -> f32 {
@@ -109,40 +143,72 @@ impl Adf {
     }
 
     pub(crate) fn probe(&self, world_point: Vec3) -> (f32, bool) {
-        let size = self.brick_size();
-        let local = (world_point - self.origin) / size;
-        let last = self.bricks.as_vec3() - Vec3::ONE;
+        let mut roomiest = f32::MIN;
+        let coarsest = self.levels.len() - 1;
+        for (step, level) in self.levels.iter().enumerate() {
+            match self.probe_level(level, world_point, step < coarsest) {
+                Reading::Outside => continue,
+                Reading::Banded(value) => return (value, true),
+                Reading::Solid(value) => return (value, false),
+                Reading::Clear(room) => roomiest = roomiest.max(room),
+            }
+        }
+        if roomiest > f32::MIN {
+            return (roomiest, false);
+        }
+        let (low, high) = self.bounds();
+        let centre = (low + high) * 0.5;
+        (
+            outside_box(world_point - centre, (high - low) * 0.5).max(self.voxel()),
+            false,
+        )
+    }
+
+    fn probe_level(&self, level: &Level, world_point: Vec3, walled: bool) -> Reading {
+        let size = level.brick_size();
+        let local = (world_point - level.origin) / size;
+        let last = level.bricks.as_vec3() - Vec3::ONE;
         if local.cmplt(Vec3::ZERO).any() || local.cmpgt(last + Vec3::ONE).any() {
-            let (low, high) = self.bounds();
-            let centre = (low + high) * 0.5;
-            return (
-                outside_box(world_point - centre, (high - low) * 0.5).max(self.voxel),
-                false,
-            );
+            return Reading::Outside;
         }
         let cell = local.floor().clamp(Vec3::ZERO, last);
         let index = cell.x as usize
-            + cell.y as usize * self.bricks.x as usize
-            + cell.z as usize * (self.bricks.x * self.bricks.y) as usize;
-        let word = self.page[index];
+            + cell.y as usize * level.bricks.x as usize
+            + cell.z as usize * (level.bricks.x * level.bricks.y) as usize;
+        let word = level.page[index];
         let tag = word >> TAG_SHIFT;
         if tag >= TAG_SOLID {
-            let low = self.origin + cell * size;
+            let low = level.origin + cell * size;
             let gap = (world_point - low).min(low + Vec3::splat(size) - world_point);
-            let room = gap.min_element().max(0.0) + self.coarse[index] + self.range();
-            return match tag == TAG_SOLID {
-                true => (-room, false),
-                false => (room, false),
-            };
+            let room = gap.min_element().max(0.0) + level.coarse[index] + level.range();
+            if tag == TAG_SOLID {
+                return Reading::Solid(-room);
+            }
+            if !walled {
+                return Reading::Clear(room);
+            }
+            let (box_low, box_high) = level.bounds();
+            let wall = (world_point - box_low)
+                .min(box_high - world_point)
+                .min_element()
+                .max(0.0);
+            return Reading::Clear(room.min(wall));
         }
         let inside = (local - cell).clamp(Vec3::ZERO, Vec3::ONE) * BRICK as f32 + APRON as f32;
-        let range = self.range();
+        let range = level.range();
         let unit = self.fetch(word & SLOT_MASK, inside);
-        (unit * 2.0 * range - range, unit > 0.002 && unit < 0.998)
+        let value = unit * 2.0 * range - range;
+        if unit <= 0.002 {
+            return Reading::Solid(value);
+        }
+        match unit < 0.998 {
+            true => Reading::Banded(value),
+            false => Reading::Clear(value),
+        }
     }
 
     pub(crate) fn normal(&self, world_point: Vec3) -> Vec3 {
-        let step = self.voxel * NORMAL_TAP;
+        let step = self.voxel() * NORMAL_TAP;
         TETRAHEDRON
             .iter()
             .map(|corner| *corner * self.distance(world_point + *corner * step))
@@ -168,6 +234,13 @@ impl Adf {
         }
         total
     }
+}
+
+enum Reading {
+    Outside,
+    Banded(f32),
+    Solid(f32),
+    Clear(f32),
 }
 
 const TETRAHEDRON: [Vec3; 4] = [
@@ -299,7 +372,15 @@ pub(crate) fn bake(surface: &Surface) -> Adf {
     bake_at(surface, asked)
 }
 
+pub(crate) fn level_count() -> u32 {
+    command_line::value("--levels").map_or(1, |count| (count as u32).clamp(1, MAX_LEVELS as u32))
+}
+
 pub(crate) fn bake_at(surface: &Surface, asked: Option<f32>) -> Adf {
+    bake_levels(surface, asked, level_count())
+}
+
+pub(crate) fn bake_levels(surface: &Surface, asked: Option<f32>, count: u32) -> Adf {
     if surface.triangles.is_empty() && surface.solids.is_empty() {
         return Adf::default();
     }
@@ -309,16 +390,139 @@ pub(crate) fn bake_at(surface: &Surface, asked: Option<f32>) -> Adf {
         low = low.min(corner_low);
         high = high.max(corner_high);
     }
+
+    let count = count.clamp(1, MAX_LEVELS as u32);
+    let budget = (brick_budget() / count).max(1);
+    let centre = (low + high) * 0.5;
+    let half = (high - low) * 0.5;
+
+    let mut parts: Vec<Adf> = Vec::new();
+    for step in 0..count {
+        let shrink = (1u32 << (count - 1 - step)) as f32;
+        let reach = half / shrink;
+        let asked = asked.map(|pinned| pinned / shrink);
+        parts.push(bake_box(
+            surface,
+            centre - reach,
+            centre + reach,
+            asked,
+            budget,
+        ));
+    }
+    for (step, part) in parts.iter().enumerate() {
+        let level = part.finest();
+        let (low, high) = level.bounds();
+        info!(
+            "level {step}: {:.4} m voxels, {:?} bricks, {} filled, {:.0} m across, low {:.0?}",
+            level.voxel,
+            level.bricks,
+            part.used,
+            (high - low).max_element(),
+            low
+        );
+    }
+    let baked = merge(parts);
+    warn_about_thin_parts(surface, baked.voxel());
+    baked
+}
+
+fn bake_box(surface: &Surface, low: Vec3, high: Vec3, asked: Option<f32>, budget: u32) -> Adf {
     let widest = (high - low).max_element().max(1e-3);
     let mut voxel = asked.unwrap_or(widest / TARGET_VOXELS);
-    let budget = brick_budget();
     loop {
         if let Some(baked) = try_bake(surface, low, high, voxel, budget) {
-            warn_about_thin_parts(surface, baked.voxel);
             return baked;
         }
         voxel *= COARSEN;
     }
+}
+
+fn merge(parts: Vec<Adf>) -> Adf {
+    if parts.len() == 1 {
+        return parts.into_iter().next().expect("one part");
+    }
+    let used: u32 = parts.iter().map(|part| part.used).sum();
+    let slots = (used.max(1) as f32).cbrt().ceil() as u32;
+    let side = slots * SPAN;
+    let paint_side = slots * BRICK;
+
+    let mut atlas = vec![0u8; (side as usize).pow(3)];
+    let mut paint = vec![0u8; (paint_side as usize).pow(3)];
+    let mut levels = Vec::with_capacity(parts.len());
+    let palette = parts[0].palette.clone();
+    let mut next = 0u32;
+
+    for part in parts {
+        let Adf {
+            levels: mut own,
+            slots: from_slots,
+            atlas: from_atlas,
+            paint: from_paint,
+            ..
+        } = part;
+        let mut level = own.remove(0);
+        for word in level.page.iter_mut() {
+            if *word >> TAG_SHIFT >= TAG_SOLID {
+                continue;
+            }
+            let from = *word & SLOT_MASK;
+            copy_block(
+                &from_atlas,
+                slot_origin(from, from_slots),
+                from_slots * SPAN,
+                &mut atlas,
+                slot_origin(next, slots),
+                side,
+                SPAN,
+            );
+            copy_block(
+                &from_paint,
+                paint_origin(from, from_slots),
+                from_slots * BRICK,
+                &mut paint,
+                paint_origin(next, slots),
+                paint_side,
+                BRICK,
+            );
+            *word = next;
+            next += 1;
+        }
+        levels.push(level);
+    }
+
+    Adf {
+        levels,
+        slots,
+        atlas,
+        paint,
+        palette,
+        used,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_block(
+    from: &[u8],
+    from_base: UVec3,
+    from_side: u32,
+    into: &mut [u8],
+    into_base: UVec3,
+    into_side: u32,
+    span: u32,
+) {
+    for z in 0..span {
+        for y in 0..span {
+            for x in 0..span {
+                let step = UVec3::new(x, y, z);
+                into[atlas_index(into_base + step, into_side)] =
+                    from[atlas_index(from_base + step, from_side)];
+            }
+        }
+    }
+}
+
+fn paint_origin(slot: u32, slots: u32) -> UVec3 {
+    UVec3::new(slot % slots, (slot / slots) % slots, slot / (slots * slots)) * BRICK
 }
 
 const THIN_VOXELS: f32 = 4.0;
@@ -378,7 +582,14 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
     let reach = Vec3::splat(range + voxel);
     let brick_of = |point: Vec3| ((point - origin) / size).floor().clamp(Vec3::ZERO, last).as_uvec3();
     let skin = size * 0.866_025_4 + range + voxel;
+    let grid_low = origin;
+    let grid_high = origin + bricks.as_vec3() * size;
     for (index, (corner_low, corner_high)) in surface.boxes.iter().enumerate() {
+        if (*corner_low - reach).cmpgt(grid_high).any()
+            || (*corner_high + reach).cmplt(grid_low).any()
+        {
+            continue;
+        }
         let first = brick_of(*corner_low - reach);
         let final_cell = brick_of(*corner_high + reach);
         let solid = surface.solid(index as u32);
@@ -479,14 +690,16 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
     let coarse = measure_coarse(&near, bricks, size);
 
     Some(Adf {
-        origin,
-        voxel,
-        bricks,
+        levels: vec![Level {
+            origin,
+            voxel,
+            bricks,
+            page,
+            coarse,
+        }],
         slots,
-        page,
         atlas,
         paint,
-        coarse,
         palette: vec![Material::default()],
         used,
     })

@@ -13,7 +13,7 @@ use bevy::{
 
 use crate::command_line;
 use crate::game::input::Action;
-use crate::sdf::adf::{Adf, MAX_MATERIALS};
+use crate::sdf::adf::{Adf, MAX_LEVELS, MAX_MATERIALS};
 use crate::sdf::dynamic::{GpuDynamic, MAX_DYNAMICS};
 use crate::sdf::light::{GpuLight, MAX_LIGHTS};
 use crate::sdf::shapes;
@@ -93,6 +93,18 @@ pub(crate) struct Quad;
 pub(crate) struct MainCamera;
 
 #[derive(ShaderType, Debug, Clone, Default, PartialEq)]
+pub(crate) struct LevelInfo {
+    pub(crate) origin: Vec3,
+    pub(crate) brick_size: f32,
+    pub(crate) bricks: UVec3,
+    pub(crate) page_at: u32,
+    pub(crate) voxel: f32,
+    pub(crate) range: f32,
+    pub(crate) spare_one: u32,
+    pub(crate) spare_two: u32,
+}
+
+#[derive(ShaderType, Debug, Clone, Default, PartialEq)]
 pub(crate) struct RenderParams {
     pub(crate) origin: Vec3,
     pub(crate) brick_size: f32,
@@ -108,9 +120,10 @@ pub(crate) struct RenderParams {
     pub(crate) atlas_side: f32,
     pub(crate) dynamic_count: u32,
     pub(crate) paint_side: f32,
-    pub(crate) padding_two: u32,
+    pub(crate) level_count: u32,
     pub(crate) padding_three: u32,
     pub(crate) dynamic_bound: Vec4,
+    pub(crate) levels: [LevelInfo; MAX_LEVELS],
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -175,6 +188,39 @@ pub(crate) fn atlas_image(voxels: &[u8], side: u32) -> Image {
     image
 }
 
+fn level_infos(adf: &Adf) -> [LevelInfo; MAX_LEVELS] {
+    let mut infos: [LevelInfo; MAX_LEVELS] = Default::default();
+    let mut at = 0u32;
+    for (index, level) in adf.levels.iter().enumerate().take(MAX_LEVELS) {
+        infos[index] = LevelInfo {
+            origin: level.origin,
+            brick_size: level.brick_size(),
+            bricks: level.bricks,
+            page_at: at,
+            voxel: level.voxel,
+            range: level.range(),
+            spare_one: 0,
+            spare_two: 0,
+        };
+        at += level.page.len() as u32;
+    }
+    infos
+}
+
+fn stacked_pages(adf: &Adf) -> Vec<u32> {
+    adf.levels
+        .iter()
+        .flat_map(|level| level.page.iter().copied())
+        .collect()
+}
+
+fn stacked_coarse(adf: &Adf) -> Vec<f32> {
+    adf.levels
+        .iter()
+        .flat_map(|level| level.coarse.iter().copied())
+        .collect()
+}
+
 pub(crate) fn spawn_quad(
     commands: &mut Commands,
     camera: Entity,
@@ -186,10 +232,12 @@ pub(crate) fn spawn_quad(
 ) {
     let material = materials.add(SdfMaterial {
         render_params: RenderParams {
-            origin: adf.origin,
-            brick_size: adf.brick_size(),
-            bricks: adf.bricks,
-            voxel: adf.voxel,
+            origin: adf.coarsest().origin,
+            brick_size: adf.coarsest().brick_size(),
+            bricks: adf.coarsest().bricks,
+            voxel: adf.voxel(),
+            level_count: adf.levels.len() as u32,
+            levels: level_infos(adf),
             omega: command_line::value("--omega").unwrap_or(OMEGA),
             shadow_steps: command_line::value("--shadow-steps").map_or(SHADOW_STEPS, |s| s as u32),
             detail: command_line::value("--detail").unwrap_or(DETAIL),
@@ -199,7 +247,7 @@ pub(crate) fn spawn_quad(
             paint_side: adf.paint_side() as f32,
             ..default()
         },
-        page: buffers.add(ShaderBuffer::from(adf.page.clone())),
+        page: buffers.add(ShaderBuffer::from(stacked_pages(adf))),
         lights: buffers.add(ShaderBuffer::from(vec![
             GpuLight::default();
             MAX_LIGHTS
@@ -211,7 +259,7 @@ pub(crate) fn spawn_quad(
         ])),
         materials: buffers.add(ShaderBuffer::from(palette(adf))),
         paint: images.add(paint_image(&adf.paint, adf.paint_side())),
-        coarse: buffers.add(ShaderBuffer::from(adf.coarse.clone())),
+        coarse: buffers.add(ShaderBuffer::from(stacked_coarse(adf))),
     });
 
     commands.entity(camera).with_child((

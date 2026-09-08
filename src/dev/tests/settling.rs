@@ -60,9 +60,9 @@ fn a_dropped_sphere_rests_one_radius_above_the_slab() {
     let (position, velocity) = drop_ball(&field, radius, TOP + 6.0, 2000);
 
     let hover = position.y - TOP;
-    let bias = field.voxel * BIAS_VOXELS;
+    let bias = field.voxel() * BIAS_VOXELS;
     assert!(
-        (hover - radius - bias).abs() < field.voxel,
+        (hover - radius - bias).abs() < field.voxel(),
         "rested {hover} above the slab; wanted radius {radius} plus the {bias} bake bias"
     );
     assert!(

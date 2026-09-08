@@ -171,6 +171,7 @@ that owns a value reads its own flag; the default stays a `const` beside it.
 | flag | default | what |
 |---|---|---|
 | `--scene <name>` | `play` | `gym`, `zoo`, `museum`, or the open world |
+| `--levels <n>` | 1 | clipmap levels, 1 to 4; each coarser level doubles the box |
 | `--model <path>` | the test map | glTF mesh to bake, first mesh, first primitive |
 | `--size <m>` | per scene | widest extent the geometry is scaled to |
 | `--bricks <n>` | 150000 | brick budget; the bake coarsens the voxel until it fits |
@@ -269,6 +270,10 @@ cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --noc
   shredded fragments. The bake warns when a part is that thin.
 - Where two surfaces meet, the crease is reconstructed at voxel resolution and
   reads as a scalloped edge. It scales with the voxel, so `--bricks` buys it back.
+- **The clipmap does not follow the player.** `--levels n` bakes nested levels
+  once, around the geometry's centre. Tracking the camera needs incremental
+  re-bake, which bake-once does not have. Thin seams also show where levels meet,
+  because the normal taps straddle a hard resolution switch.
 - **Materials melt across close junctions.** Every surface is inflated by the
   0.866-voxel bias, so two of them closer together than about 1.7 voxels fuse,
   and the fused blob takes its material from whichever source is nearest. Exact

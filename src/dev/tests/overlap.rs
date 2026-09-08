@@ -62,9 +62,9 @@ fn a_sphere_poking_out_of_a_box_never_overestimates_the_union() {
     let (checked, worst) = probe(&field, &parts);
     assert!(checked > 2000, "only {checked} samples landed inside the band");
     assert!(
-        worst < 2.0 * field.voxel,
+        worst < 2.0 * field.voxel(),
         "baked field ran {worst} m above the true union, {} voxels",
-        worst / field.voxel
+        worst / field.voxel()
     );
 }
 
@@ -145,9 +145,9 @@ fn a_cylinder_poking_out_of_a_box_never_overestimates_the_union() {
     }
     assert!(checked > 2000, "only {checked} samples landed inside the band");
     assert!(
-        worst < 2.0 * field.voxel,
+        worst < 2.0 * field.voxel(),
         "baked field ran {worst} m above the true union at {where_worst:?}, {} voxels",
-        worst / field.voxel
+        worst / field.voxel()
     );
 }
 
@@ -173,12 +173,12 @@ fn a_sphere_half_buried_in_a_box_survives_a_coarse_bake() {
                 assert!(
                     field.distance(point) < 0.0,
                     "at {:.4} m voxels a point {truth} inside the union read {} at {point:?}",
-                    field.voxel,
+                    field.voxel(),
                     field.distance(point)
                 );
                 continue;
             }
-            if truth > field.brick_size() {
+            if truth > field.finest().brick_size() {
                 continue;
             }
             checked += 1;
@@ -190,16 +190,16 @@ fn a_sphere_half_buried_in_a_box_survives_a_coarse_bake() {
         }
         println!(
             "voxel {:.4} bricks {:?} used {} checked {checked} worst {:.4} ({:.2} voxels) at {where_worst:?}",
-            field.voxel,
-            field.bricks,
+            field.voxel(),
+            field.bricks(),
             field.used,
             worst,
-            worst / field.voxel
+            worst / field.voxel()
         );
         assert!(
-            worst < 2.0 * field.voxel,
+            worst < 2.0 * field.voxel(),
             "at {:.4} m voxels the union ran {worst} m above the truth at {where_worst:?}",
-            field.voxel
+            field.voxel()
         );
     }
 }
@@ -237,7 +237,7 @@ fn probe_solids(solids: &[Solid], exact: impl Fn(Vec3) -> f32) -> (usize, f32, f
         checked += 1;
         worst = worst.max(field.distance(point) - truth);
     }
-    (checked, worst, field.voxel)
+    (checked, worst, field.voxel())
 }
 
 #[test]
@@ -265,5 +265,42 @@ fn a_solid_cylinder_cap_edge_never_overestimates_the_union() {
         worst < 2.0 * voxel,
         "baked solids ran {worst} m above the true union at a cap edge, {} voxels",
         worst / voxel
+    );
+}
+
+#[test]
+fn a_clipmap_of_solids_never_overestimates_at_any_level() {
+    let solids = solid_box_and(Shape::Cylinder {
+        radius: BALL,
+        half_height: HALF,
+    });
+    let field = adf::bake_levels(
+        &Surface::new(&[], &[], &[]).with_solids(&solids),
+        None,
+        3,
+    );
+    assert_eq!(field.levels.len(), 3, "three levels were asked for");
+
+    let mut checked = 0;
+    let mut worst: f32 = 0.0;
+    for step in 0..400000 {
+        let unit = Vec3::new(
+            ((step * 7919) % 211) as f32 / 210.0,
+            ((step * 6151) % 193) as f32 / 192.0,
+            ((step * 3571) % 179) as f32 / 178.0,
+        );
+        let point = Vec3::splat(-HALF - 1.0) + unit * (2.0 * HALF + 2.0 + CENTRE.max_element());
+        let truth = exact_box(point).min(exact_rod(point));
+        if truth.abs() > field.coarsest().range() {
+            continue;
+        }
+        checked += 1;
+        worst = worst.max(field.distance(point) - truth);
+    }
+    assert!(checked > 2000, "only {checked} samples landed inside the band");
+    assert!(
+        worst < 2.0 * field.coarsest().voxel,
+        "the clipmap ran {worst} m above the truth, {} coarse voxels",
+        worst / field.coarsest().voxel
     );
 }

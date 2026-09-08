@@ -70,7 +70,7 @@ fn update_stats(
         window.resolution.physical_height(),
     );
     let here = field.distance(camera.translation());
-    let bricks = field.bricks;
+    let bricks = field.bricks();
     let (low, high) = field.bounds();
     let span = high - low;
 
@@ -89,7 +89,7 @@ fn update_stats(
         bricks.y,
         bricks.z,
         field.used,
-        field.voxel,
+        field.voxel(),
         span.x,
         span.y,
         span.z,

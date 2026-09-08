@@ -328,11 +328,11 @@ fn bake_when_ready(
         triangles.len(),
         adf.used,
         adf::brick_budget(),
-        adf.voxel,
+        adf.voxel(),
         (high - low).max_element().round(),
         adf.atlas.len() >> 20,
         adf.paint.len() >> 20,
-        (adf.page.len() * 4) >> 20,
+        (adf.levels.iter().map(|level| level.page.len()).sum::<usize>() * 4) >> 20,
         started.elapsed().as_secs_f32()
     );
 

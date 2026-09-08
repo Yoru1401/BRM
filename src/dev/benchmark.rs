@@ -132,7 +132,7 @@ fn record(
          \tframe_min\t{:.3}\tframe_median\t{:.3}\tframe_p95\t{:.3}\tframes\t{}\tgpu_samples\t{}",
         frames.done + 1,
         field.used,
-        field.voxel,
+        field.voxel(),
         params.omega,
         params.light_count,
         bench.shadows.min(bench.lights),

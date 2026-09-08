@@ -1,3 +1,14 @@
+struct LevelInfo {
+    origin: vec3<f32>,
+    brick_size: f32,
+    bricks: vec3<u32>,
+    page_at: u32,
+    voxel: f32,
+    range: f32,
+    spare_one: u32,
+    spare_two: u32,
+};
+
 struct RenderParams {
     origin: vec3<f32>,
     brick_size: f32,
@@ -13,9 +24,10 @@ struct RenderParams {
     atlas_side: f32,
     dynamic_count: u32,
     paint_side: f32,
-    padding_two: u32,
+    level_count: u32,
     padding_three: u32,
     dynamic_bound: vec4<f32>,
+    levels: array<LevelInfo, 4>,
 };
 
 struct Dynamic {

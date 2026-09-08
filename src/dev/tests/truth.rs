@@ -164,10 +164,10 @@ fn how_far_the_bake_strays_from_the_truth() {
     );
     println!(
         "voxel {:.4} brick {:.4} range {:.4} bricks {:?} used {}",
-        field.voxel,
-        field.brick_size(),
+        field.voxel(),
+        field.finest().brick_size(),
         field.range(),
-        field.bricks,
+        field.bricks(),
         field.used
     );
 
@@ -190,8 +190,8 @@ fn how_far_the_bake_strays_from_the_truth() {
         under.see(truth - baked, point, &field);
     }
 
-    println!("overestimates: {}", over.tell(field.voxel));
-    println!("underestimates: {}", under.tell(field.voxel));
+    println!("overestimates: {}", over.tell(field.voxel()));
+    println!("underestimates: {}", under.tell(field.voxel()));
     assert!(over.samples > 200, "only {} samples in the band", over.samples);
 }
 

@@ -135,7 +135,7 @@ fn spawn_character(mut commands: Commands, field: Res<Adf>) {
 }
 
 pub(crate) fn ground_below(field: &Adf, from: Vec3, reach: f32) -> Option<f32> {
-    let step_floor = field.voxel * 0.05;
+    let step_floor = field.voxel() * 0.05;
     let mut travelled = 0.0;
     for _ in 0..64 {
         let clearance = field.distance(from + Vec3::NEG_Y * travelled);

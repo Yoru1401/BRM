@@ -43,7 +43,7 @@ fn the_bake_never_overestimates_the_distance() {
             sampled <= exact + 1e-4,
             "overestimated at {point:?}: {sampled} against {exact}"
         );
-        if exact < field.range() && (sampled - exact).abs() < 2.0 * field.voxel {
+        if exact < field.range() && (sampled - exact).abs() < 2.0 * field.voxel() {
             agreed += 1;
         }
     }
@@ -72,7 +72,7 @@ fn the_inside_of_a_cube_reads_negative() {
 #[test]
 fn the_normal_points_out_of_the_nearest_face() {
     let field = baked(1.0);
-    let normal = field.normal(Vec3::new(0.0, 1.0 + field.voxel, 0.0));
+    let normal = field.normal(Vec3::new(0.0, 1.0 + field.voxel(), 0.0));
     assert!(
         normal.dot(Vec3::Y) > 0.9,
         "normal above the top face was {normal:?}"
@@ -83,7 +83,7 @@ fn the_normal_points_out_of_the_nearest_face() {
 fn empty_bricks_still_bound_the_step() {
     let field = baked(1.0);
     let (low, _) = field.bounds();
-    let corner = low + Vec3::splat(field.voxel * 0.5);
+    let corner = low + Vec3::splat(field.voxel() * 0.5);
     let sampled = field.distance(corner);
     assert!(
         sampled > 0.0 && sampled <= exact_box(corner, 1.0) + 1e-4,
@@ -140,7 +140,7 @@ fn how_much_of_the_normal_error_is_the_mesh() {
         let mut worst: f32 = 0.0;
         let mut total = 0.0;
         for point in &surface {
-            let step = field.voxel;
+            let step = field.voxel();
             let read = TETRAHEDRON
                 .iter()
                 .map(|corner| *corner * field.distance(*point + *corner * step))
