@@ -5,7 +5,7 @@ use crate::sdf::field::{
     MATERIAL_BODY, MATERIAL_CHALK, MATERIAL_CLAY, MATERIAL_GLASS, MATERIAL_METAL, MATERIAL_STONE,
     MATERIAL_TERRAIN,
 };
-use crate::sdf::solid::{Shape, Solid};
+use crate::sdf::solid::{Op, Shape, Solid};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scene {
@@ -57,7 +57,8 @@ impl Scene {
                 "[V] hide the marching quad\n",
                 "west: penumbra widens with distance\n",
                 "centre: bodies folded into the field\n",
-                "east: spheres shrinking past the voxel",
+                "east: spheres shrinking past the voxel\n",
+                "south: subtract, smooth union, smooth subtract",
             ),
         }
     }
@@ -83,6 +84,13 @@ impl Bench {
     fn turned(&mut self, shape: Shape, centre: Vec3, turn: Quat, material: u32) {
         self.solids
             .push(Solid::new(shape, centre, turn, material as u8, self.part));
+        self.part = self.part.wrapping_add(1);
+    }
+
+    fn folded(&mut self, shape: Shape, centre: Vec3, material: u32, op: Op) {
+        self.solids.push(
+            Solid::new(shape, centre, Quat::IDENTITY, material as u8, self.part).with_op(op),
+        );
         self.part = self.part.wrapping_add(1);
     }
 
@@ -269,6 +277,46 @@ fn museum() -> Vec<Solid> {
         );
         along += radius * 2.0 + 4.0;
     }
+
+    bench.put(
+        Shape::Box {
+            half: Vec3::new(4.0, 4.0, 4.0),
+        },
+        Vec3::new(-20.0, 4.0, -30.0),
+        MATERIAL_CLAY,
+    );
+    bench.folded(
+        Shape::Sphere { radius: 3.2 },
+        Vec3::new(-20.0, 7.5, -33.0),
+        MATERIAL_CLAY,
+        Op::Subtract,
+    );
+
+    bench.put(
+        Shape::Sphere { radius: 3.0 },
+        Vec3::new(0.0, 3.0, -34.0),
+        MATERIAL_CHALK,
+    );
+    bench.folded(
+        Shape::Sphere { radius: 2.4 },
+        Vec3::new(5.5, 3.0, -34.0),
+        MATERIAL_CHALK,
+        Op::SmoothUnion(2.2),
+    );
+
+    bench.put(
+        Shape::Box {
+            half: Vec3::splat(3.0),
+        },
+        Vec3::new(18.0, 3.0, -34.0),
+        MATERIAL_METAL,
+    );
+    bench.folded(
+        Shape::Sphere { radius: 3.0 },
+        Vec3::new(21.0, 5.5, -32.0),
+        MATERIAL_METAL,
+        Op::SmoothSubtract(1.5),
+    );
 
     for (index, material) in [MATERIAL_CLAY, MATERIAL_METAL, MATERIAL_CHALK]
         .into_iter()

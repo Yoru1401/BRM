@@ -23,6 +23,50 @@ pub(crate) enum Shape {
     },
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Op {
+    Union,
+    Subtract,
+    Intersect,
+    SmoothUnion(f32),
+    SmoothSubtract(f32),
+}
+
+impl Op {
+    pub(crate) fn fold(self, standing: f32, edit: f32) -> f32 {
+        match self {
+            Op::Union => standing.min(edit),
+            Op::Subtract => standing.max(-edit),
+            Op::Intersect => standing.max(edit),
+            Op::SmoothUnion(width) => soft_min(standing, edit, width),
+            Op::SmoothSubtract(width) => -soft_min(-standing, edit, width),
+        }
+    }
+
+    pub(crate) fn everywhere(self) -> bool {
+        self == Op::Intersect
+    }
+
+    pub(crate) fn width(self) -> f32 {
+        match self {
+            Op::SmoothUnion(width) | Op::SmoothSubtract(width) => width,
+            _ => 0.0,
+        }
+    }
+
+    pub(crate) fn carves(self) -> bool {
+        matches!(self, Op::Subtract | Op::SmoothSubtract(_))
+    }
+}
+
+fn soft_min(first: f32, second: f32, width: f32) -> f32 {
+    if width <= 0.0 {
+        return first.min(second);
+    }
+    let blend = (0.5 + 0.5 * (second - first) / width).clamp(0.0, 1.0);
+    second * (1.0 - blend) + first * blend - width * blend * (1.0 - blend)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Solid {
     shape: Shape,
@@ -30,6 +74,7 @@ pub(crate) struct Solid {
     unturn: Quat,
     pub(crate) material: u8,
     pub(crate) part: u16,
+    pub(crate) op: Op,
 }
 
 impl Solid {
@@ -40,7 +85,13 @@ impl Solid {
             unturn: turn.inverse(),
             material,
             part,
+            op: Op::Union,
         }
+    }
+
+    pub(crate) fn with_op(mut self, op: Op) -> Self {
+        self.op = op;
+        self
     }
 
     pub(crate) fn distance(&self, point: Vec3) -> f32 {

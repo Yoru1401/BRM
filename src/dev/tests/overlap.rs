@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::sdf::adf::{self, Adf, Surface};
-use crate::sdf::solid::{Shape, Solid};
+use crate::sdf::solid::{Op, Shape, Solid};
 
 const HALF: f32 = 2.0;
 const BALL: f32 = 1.4;
@@ -302,5 +302,45 @@ fn a_clipmap_of_solids_never_overestimates_at_any_level() {
         worst < 2.0 * field.coarsest().voxel,
         "the clipmap ran {worst} m above the truth, {} coarse voxels",
         worst / field.coarsest().voxel
+    );
+}
+
+#[test]
+fn carving_a_sphere_out_of_a_box_leaves_the_difference() {
+    let solids = [
+        Solid::new(
+            Shape::Box {
+                half: Vec3::splat(HALF),
+            },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            0,
+            0,
+        ),
+        Solid::new(Shape::Sphere { radius: BALL }, CENTRE, Quat::IDENTITY, 0, 1)
+            .with_op(Op::Subtract),
+    ];
+    let carved = |point: Vec3| exact_box(point).max(-(point.distance(CENTRE) - BALL));
+
+    let (checked, worst, voxel) = probe_solids(&solids, carved);
+    assert!(checked > 2000, "only {checked} samples landed inside the band");
+    assert!(
+        worst < 2.0 * voxel,
+        "the carved field ran {worst} m above the difference, {} voxels",
+        worst / voxel
+    );
+
+    let field = adf::bake(&Surface::new(&[], &[], &[]).with_solids(&solids));
+    let bitten = CENTRE - Vec3::splat(BALL * 0.3);
+    assert!(
+        field.distance(bitten) > 0.0,
+        "the carved-out region still reads solid: {}",
+        field.distance(bitten)
+    );
+    let kept = Vec3::new(-HALF * 0.6, -HALF * 0.6, 0.0);
+    assert!(
+        field.distance(kept) < 0.0,
+        "the far corner of the box was carved away too: {}",
+        field.distance(kept)
     );
 }

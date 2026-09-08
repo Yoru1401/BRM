@@ -12,14 +12,15 @@ exact solids, a triangle mesh, or both; it voxelises them into a sparse brick
 volume at startup, and everything after that reads the volume.
 
 Solids live in `src/sdf/solid.rs` - box, sphere, cylinder, capped frustum,
-torus - and are evaluated **on the CPU at bake time**, never in a shader. That
+torus - each carrying an **operation**, and are evaluated **on the CPU at bake
+time**, never in a shader. That
 is a precision decision: a mesh sphere bakes as the icosphere it is, and at the
 tessellation the generated world used, its facets were two to eight times
 coarser than the voxels sampling them. Meshes remain, for imports.
 
 - **Bake** - `src/sdf/adf.rs`. Triangles and solids are binned per brick, each brick holds
   8³ voxels plus a one-voxel apron, and every voxel stores the signed distance to
-  the surface, biased down by half a voxel diagonal so the trilinear
+  the folded edit list, biased down by half a voxel diagonal so the trilinear
   reconstruction can never overestimate. A mesh's sign comes from an
   angle-weighted pseudonormal at the closest point; a solid's is exact. Solids
   bin by a near-surface shell rather than by their box, because a sphere's box
@@ -108,7 +109,7 @@ its own legend in the overlay.
 |---|---|---|
 | `gym` | what the controller can do: risers 0.25-3.0 m, gaps 1-6 m, ramps 10-50 degrees, clearance bars 1.2-3.0 m | `--scene gym --play` |
 | `zoo` | every material on an identical sphere, every solid the baker knows, and a post one character tall for scale | `--scene zoo` |
-| `museum` | penumbra widening with distance, bodies folded into the field, spheres shrinking past the voxel | `--scene museum` |
+| `museum` | penumbra widening with distance, bodies folded into the field, spheres shrinking past the voxel, and the four boolean operations | `--scene museum` |
 
 Nothing is labelled in world space: the legend is the overlay, and the obstacles
 are ordered so you read the limit off the last one you clear.
@@ -263,17 +264,43 @@ cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --noc
   quantisation. The fix is a 16-bit atlas; it has not been done.
 - Soft shadows are hard shadows: the penumbra is only as wide as the encoded
   band, four voxels.
-- No CSG. Two models cannot be combined; the field is whatever the triangles say.
+- **CSG is bake-time only.** Solids combine with any operator; two imported *meshes* still cannot be combined.
 - Dynamics render but do not collide with each other through the field: the CPU
   field is the baked one only.
 - Nothing thinner than about four voxels survives the bake; it comes out as
   shredded fragments. The bake warns when a part is that thin.
 - Where two surfaces meet, the crease is reconstructed at voxel resolution and
   reads as a scalloped edge. It scales with the voxel, so `--bricks` buys it back.
+### Boolean operations
+
+The bake folds an ordered list of edits rather than taking a `min` over parts,
+so a solid can **union, subtract, intersect**, or blend smoothly into what came
+before it. `--scene museum` shows a carved box, a smooth union and a smooth
+subtraction.
+
+Culling is what makes this delicate, and it differs per operator. A union whose
+surface is far away cannot matter, so it can be dropped. A **subtractor** deep
+around a brick still matters even though its surface is distant, so edits bin by
+their bounding box rather than by a shell. An **intersector** matters
+*everywhere* — a culled one has to read as "outside", not as "absent" — so those
+go into every brick. Getting this wrong is silent; `memory/reference/edits.md`
+has the table.
+
+Binning by box costs something: it defeats the burial test that used to skip a
+solid's interior. A single fold at each brick's centre replaces it — if the
+folded field there is further outside the band than the brick's own half
+diagonal, nothing in that brick is worth storing. One evaluation per brick
+instead of a thousand.
+
 - **The clipmap does not follow the player.** `--levels n` bakes nested levels
   once, around the geometry's centre. Tracking the camera needs incremental
   re-bake, which bake-once does not have. Thin seams also show where levels meet,
   because the normal taps straddle a hard resolution switch.
+- **Intersect is untested**, and it is binned into every brick, which is only
+  cheap while there are one or two of them.
+- **CSG is not a true distance field near a carved rim**: `max(a, -b)`
+  overestimates there, so a ray can overshoot slightly. The bias absorbs some of
+  it; nothing measures how much.
 - **Materials melt across close junctions.** Every surface is inflated by the
   0.866-voxel bias, so two of them closer together than about 1.7 voxels fuse,
   and the fused blob takes its material from whichever source is nearest. Exact

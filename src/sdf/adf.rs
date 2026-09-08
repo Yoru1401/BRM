@@ -5,7 +5,7 @@ use bevy::{
 };
 
 use crate::command_line;
-use crate::sdf::solid::Solid;
+use crate::sdf::solid::{Op, Solid};
 
 pub(crate) const BRICK: u32 = 8;
 pub(crate) const APRON: u32 = 1;
@@ -299,6 +299,13 @@ impl<'a> Surface<'a> {
         self.solids.get((index as usize).checked_sub(self.triangles.len())?)
     }
 
+    fn op(&self, index: u32) -> Op {
+        match self.solid(index) {
+            Some(solid) => solid.op,
+            None => Op::Union,
+        }
+    }
+
     fn part(&self, index: u32) -> u16 {
         match self.solid(index) {
             Some(solid) => solid.part,
@@ -581,28 +588,23 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
     let last = bricks.as_vec3() - Vec3::ONE;
     let reach = Vec3::splat(range + voxel);
     let brick_of = |point: Vec3| ((point - origin) / size).floor().clamp(Vec3::ZERO, last).as_uvec3();
-    let skin = size * 0.866_025_4 + range + voxel;
     let grid_low = origin;
     let grid_high = origin + bricks.as_vec3() * size;
     for (index, (corner_low, corner_high)) in surface.boxes.iter().enumerate() {
-        if (*corner_low - reach).cmpgt(grid_high).any()
-            || (*corner_high + reach).cmplt(grid_low).any()
+        let everywhere = surface.op(index as u32).everywhere();
+        if !everywhere
+            && ((*corner_low - reach).cmpgt(grid_high).any()
+                || (*corner_high + reach).cmplt(grid_low).any())
         {
             continue;
         }
-        let first = brick_of(*corner_low - reach);
-        let final_cell = brick_of(*corner_high + reach);
-        let solid = surface.solid(index as u32);
+        let (first, final_cell) = match everywhere {
+            true => (UVec3::ZERO, bricks - UVec3::ONE),
+            false => (brick_of(*corner_low - reach), brick_of(*corner_high + reach)),
+        };
         for z in first.z..=final_cell.z {
             for y in first.y..=final_cell.y {
                 for x in first.x..=final_cell.x {
-                    if let Some(solid) = solid {
-                        let middle = origin
-                            + (UVec3::new(x, y, z).as_vec3() + Vec3::splat(0.5)) * size;
-                        if solid.distance(middle).abs() > skin {
-                            continue;
-                        }
-                    }
                     lists[(x + y * bricks.x + z * bricks.x * bricks.y) as usize].push(index as u32);
                 }
             }
@@ -612,7 +614,21 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
     for list in lists.iter_mut() {
         list.sort_unstable_by_key(|index| surface.part(*index));
     }
-    let buried = buried_bricks(surface, &lists, bricks);
+    let mut buried = buried_bricks(surface, &lists, bricks);
+    for (index, list) in lists.iter().enumerate() {
+        if buried[index] && list.iter().any(|edit| surface.op(*edit).carves()) {
+            buried[index] = false;
+        }
+    }
+
+    let tie = (voxel * 1e-3).powi(2);
+    let half_diagonal = size * 0.866_025_4;
+    let blur = surface
+        .solids
+        .iter()
+        .map(|solid| solid.op.width())
+        .fold(0.0f32, f32::max);
+    let banded = half_diagonal + range + blur + voxel;
 
     let mut candidates = Vec::new();
     for (index, list) in lists.iter().enumerate() {
@@ -624,11 +640,15 @@ fn try_bake(surface: &Surface, low: Vec3, high: Vec3, voxel: f32, budget: u32) -
             ((index as u32) / bricks.x) % bricks.y,
             (index as u32) / (bricks.x * bricks.y),
         );
-        candidates.push((index, origin + cell.as_vec3() * size, list));
+        let corner = origin + cell.as_vec3() * size;
+        let middle = corner + Vec3::splat(size * 0.5);
+        if signed_distance(middle, surface, list, tie).0.abs() > banded {
+            continue;
+        }
+        candidates.push((index, corner, list));
     }
 
     let bias = BIAS_VOXELS * voxel;
-    let tie = (voxel * 1e-3).powi(2);
     let pool = ComputeTaskPool::get_or_init(TaskPool::default);
     let batch = candidates.len().div_ceil(pool.thread_num().max(1) * 8).max(1);
     let blocks: Vec<Vec<Brick>> = pool.scope(|scope| {
@@ -948,18 +968,18 @@ fn brick_voxels(
 }
 
 fn signed_distance(point: Vec3, surface: &Surface, list: &[u32], tie: f32) -> (f32, u8) {
-    let mut nearest_signed = f32::MAX;
+    let mut standing = f32::MAX;
     let mut material = 0u8;
     let mut at = 0usize;
 
     while at < list.len() {
         let part = surface.part(list[at]);
         if let Some(solid) = surface.solid(list[at]) {
-            let signed = solid.distance(point);
-            if signed < nearest_signed {
-                nearest_signed = signed;
+            let folded = solid.op.fold(standing, solid.distance(point));
+            if folded < standing {
                 material = solid.material;
             }
+            standing = folded;
             while at < list.len() && surface.part(list[at]) == part {
                 at += 1;
             }
@@ -1010,13 +1030,13 @@ fn signed_distance(point: Vec3, surface: &Surface, list: &[u32], tie: f32) -> (f
             true => -reach,
             false => reach,
         };
-        if signed < nearest_signed {
-            nearest_signed = signed;
+        if signed < standing {
+            standing = signed;
             material = chosen;
         }
     }
 
-    (nearest_signed, material)
+    (standing, material)
 }
 
 fn corner_weight(triangle: &[Vec3; 3], contact: Vec3, tie: f32) -> f32 {
