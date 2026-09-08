@@ -4,7 +4,7 @@ mod display;
 mod game;
 mod sdf;
 
-use bevy::{prelude::*, window::PresentMode};
+use bevy::{prelude::*, render::diagnostic::RenderDiagnosticsPlugin, window::PresentMode};
 
 fn main() {
     let bench = dev::benchmark::requested();
@@ -35,6 +35,7 @@ fn main() {
         (Some(bench), _) => {
             app.add_plugins((
                 game::scene::ScenePlugin,
+                RenderDiagnosticsPlugin,
                 dev::benchmark::BenchmarkPlugin(bench),
             ));
         }

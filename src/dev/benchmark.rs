@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{diagnostic::DiagnosticsStore, prelude::*};
 
 use crate::command_line;
 use crate::sdf::adf::Adf;
@@ -52,10 +52,28 @@ fn trim_lights(mut commands: Commands, bench: Res<Bench>, lights: Query<(Entity,
 #[derive(Resource, Default)]
 struct Frames {
     times: Vec<f32>,
+    drawn: Vec<f32>,
     done: usize,
     settled: Option<std::time::Instant>,
 }
 
+const PASS: &str = "main_opaque_pass_3d";
+
+fn drawn_millis(store: &DiagnosticsStore) -> Option<f64> {
+    store
+        .iter()
+        .filter(|entry| {
+            let path = entry.path().as_str();
+            path.contains(PASS) && path.ends_with("/elapsed_gpu")
+        })
+        .find_map(|entry| entry.value())
+}
+
+fn middle(sorted: &[f32], fraction: f32) -> f32 {
+    sorted[((sorted.len() - 1) as f32 * fraction) as usize]
+}
+
+#[allow(clippy::too_many_arguments)]
 fn record(
     mut frames: ResMut<Frames>,
     time: Res<Time>,
@@ -63,6 +81,7 @@ fn record(
     field: Res<Adf>,
     quad: Single<&MeshMaterial3d<SdfMaterial>, With<Quad>>,
     materials: Res<Assets<SdfMaterial>>,
+    diagnostics: Res<DiagnosticsStore>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let settled = frames.settled.get_or_insert_with(std::time::Instant::now);
@@ -70,6 +89,9 @@ fn record(
         return;
     }
     frames.times.push(time.delta_secs() * 1000.0);
+    if let Some(millis) = drawn_millis(&diagnostics) {
+        frames.drawn.push(millis as f32);
+    }
     if frames.times.len() < WARMUP_FRAMES + RECORDED_FRAMES {
         return;
     }
@@ -80,15 +102,34 @@ fn record(
     let mut recorded: Vec<f32> = frames.times.split_off(WARMUP_FRAMES);
     frames.times.clear();
     recorded.sort_by(f32::total_cmp);
-    let at = |fraction: f32| recorded[((recorded.len() - 1) as f32 * fraction) as usize];
 
-    let median = at(0.5);
-    if (median - 1000.0 / 60.0).abs() < 0.2 {
-        eprintln!("bench: median {median:.3} ms is suspiciously exactly 60 Hz - vsync?");
+    let mut drawn = std::mem::take(&mut frames.drawn);
+    let warmed = WARMUP_FRAMES.min(drawn.len());
+    let mut drawn: Vec<f32> = drawn.split_off(warmed);
+    drawn.sort_by(f32::total_cmp);
+
+    let gpu = |fraction: f32| match drawn.is_empty() {
+        true => f32::NAN,
+        false => middle(&drawn, fraction),
+    };
+
+    let median = middle(&recorded, 0.5);
+    if drawn.is_empty() {
+        eprintln!(
+            "bench: no GPU timing for {PASS}; the adapter has no timestamp query, so the \
+             frame column is all there is and vsync will mask the render"
+        );
+    } else if (median - 1000.0 / 60.0).abs() < 0.2 {
+        eprintln!(
+            "bench: frame median {median:.3} ms is the 60 Hz refresh, not the render - \
+             read the gpu column"
+        );
     }
 
     println!(
-        "run\t{}\tbricks\t{}\tvoxel\t{:.4}\tomega\t{:.2}\tlights\t{}\tshadows\t{}\tsteps\t{}\tmin\t{:.3}\tmedian\t{:.3}\tp95\t{:.3}\tframes\t{}",
+        "run\t{}\tbricks\t{}\tvoxel\t{:.4}\tomega\t{:.2}\tlights\t{}\tshadows\t{}\tsteps\t{}\
+         \tgpu_min\t{:.3}\tgpu_median\t{:.3}\tgpu_p95\t{:.3}\
+         \tframe_min\t{:.3}\tframe_median\t{:.3}\tframe_p95\t{:.3}\tframes\t{}\tgpu_samples\t{}",
         frames.done + 1,
         field.used,
         field.voxel,
@@ -96,10 +137,14 @@ fn record(
         params.light_count,
         bench.shadows.min(bench.lights),
         params.shadow_steps,
-        at(0.0),
+        gpu(0.0),
+        gpu(0.5),
+        gpu(0.95),
+        middle(&recorded, 0.0),
         median,
-        at(0.95),
+        middle(&recorded, 0.95),
         recorded.len(),
+        drawn.len(),
     );
 
     frames.done += 1;

@@ -125,10 +125,13 @@ adf: 75266 triangles, 90689 bricks of 150000, 1.099 m voxels,
 The documentation scenes bake in 2.6-4.2 s and get far finer voxels for it:
 0.066 m in the zoo, 0.154 m in the gym, 0.165 m in the museum.
 
-**Frame time is currently unmeasurable.** Every `bench` run reports 16.7 ms,
-exactly 60 Hz, in every present mode and in fullscreen - the compositor is
-holding vsync, and the harness says so itself. Treat any frame time in this file
-as unverified until that is fixed.
+**4.0 ms of GPU time at 720p** on the 1 km open world with four lights, a
+shadowed sun, dynamic shapes and per-voxel materials; 2.3 ms in the museum. Read
+the `gpu_*` columns, never the `frame_*` ones - the frame delta is what the
+compositor allowed, and it settles onto the 60 Hz refresh from the second repeat
+onward. Because a vsynced repeat leaves the GPU idle 12 ms out of every 16, its
+clocks drop and its `gpu_median` reads about 12% high: **the first run of a
+`--repeat` is the honest one.**
 
 Debug builds are misleading for a different reason: `debug-assertions` are
 profile-wide and put a ~2 ms floor under every frame.
@@ -146,9 +149,19 @@ cargo run --release -- bench --repeat 3
 cargo run --release -- bench --repeat 3 --lights 3 --shadows 1
 ```
 
-Prints one tab-separated line of min / median / p95 frame ms and exits. Use
-`--repeat 3` or more and read the last run: the first block is still warming up,
-and can catch the shader before it has loaded.
+Prints one tab-separated line per run and exits. Two sets of columns:
+
+- **`gpu_*`** - GPU timestamps around `main_opaque_pass_3d`, from Bevy's
+  `RenderDiagnosticsPlugin`. This is the render, and it is what a rendering
+  change moves.
+- **`frame_*`** - wall-clock frame delta. Includes the wait for present, so it
+  reads the refresh rate whenever the compositor holds vsync. Useful only to see
+  *that* it happened.
+
+`--repeat 3` runs three blocks. **Read the first**: later blocks are usually
+vsynced, and a GPU that idles most of each frame downclocks and reads high. If
+the adapter has no timestamp query the `gpu_*` columns are `NaN` and the bench
+says so.
 
 ## Flags
 
@@ -260,8 +273,6 @@ cargo test --release how_much_of_the_normal_error_is_the_mesh -- --ignored --noc
   0.866-voxel bias, so two of them closer together than about 1.7 voxels fuse,
   and the fused blob takes its material from whichever source is nearest. Exact
   input does not help; only a smaller voxel does.
-- **The bench is blind.** Nothing about frame time can be claimed until it is
-  fixed.
 - A glTF's own materials are ignored: an imported model is all material 0.
 - Body radius is capped at `range * 0.9`, so **physics scale is limited by bake
   resolution** — a 1 km world at 1.1 m voxels cannot carry metre-scale bodies.
