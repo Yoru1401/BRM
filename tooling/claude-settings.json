@@ -1,0 +1,72 @@
+{
+  "enabledPlugins": {
+    "i-have-adhd@i-have-adhd": true,
+    "caveman@caveman": true,
+    "ponytail@ponytail": true,
+    "okf@scaccogatto": true,
+    "context7@context7-marketplace": true,
+    "superpowers@superpowers-dev": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/anthropics/claude-plugins-official.git"
+      }
+    },
+    "i-have-adhd": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/ayghri/i-have-adhd.git"
+      }
+    },
+    "caveman": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/juliusbrussee/caveman.git"
+      }
+    },
+    "ponytail": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/DietrichGebert/ponytail.git"
+      }
+    },
+    "scaccogatto": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/scaccogatto/okf-skills.git"
+      }
+    },
+    "context7-marketplace": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/upstash/context7.git"
+      }
+    },
+    "superpowers-dev": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/obra/superpowers.git"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
+  "autoUpdatesChannel": "latest",
+  "theme": "auto",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content -Raw 'C:\\Users\\Flori\\.claude\\standing-directives.md'\"",
+            "timeout": 5,
+            "statusMessage": "Loading standing directives"
+          }
+        ]
+      }
+    ]
+  }
+}

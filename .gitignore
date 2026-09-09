@@ -1,8 +1,7 @@
 /target
 
-# Working memory for the AI sessions - notes, decisions, benchmarks.
-# Local only, on purpose.
-/memory
-
-# Local-only: a SessionStart hook that reads memory/, which is itself local.
+# Machine-local: may hold absolute paths and per-machine overrides.
 /.claude/settings.local.json
+
+# Obsidian's own editor state, not knowledge.
+/memory/.obsidian
